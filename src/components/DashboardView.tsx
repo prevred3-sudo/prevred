@@ -173,7 +173,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 className="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
               >
                 <Cloud className="w-3.5 h-3.5" />
-                <span>Google Drive (prevred@gmail.com)</span>
+                <span>Google Drive (prevred3@gmail.com)</span>
               </button>
 
               <button

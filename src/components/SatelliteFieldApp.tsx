@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Camera,
   AlertTriangle,
@@ -17,19 +17,23 @@ import {
   RefreshCw,
   Clock,
   Database,
-  Trash2
+  Trash2,
+  Cloud
 } from 'lucide-react';
 import { Incident, IncidentType, SeverityLevel } from '../types';
 import { safetyAudio } from '../utils/audioAlert';
 import { usePWAInstall } from '../utils/usePWAInstall';
 import { useOfflineSyncQueue } from '../utils/useOfflineSyncQueue';
+import { getAccessToken, getCurrentAppUser } from '../utils/firebaseAuth';
+import { saveIncidentToDrive } from '../services/googleDriveService';
 
 interface SatelliteFieldAppProps {
   onBackToMatrix: () => void;
-  onSubmitIncident: (incident: Incident) => void;
+  onSubmitIncident: (incident: Incident) => Promise<any> | void;
   myRecentIncidents: Incident[];
   onTriggerEmergency: (location: string, message: string) => void;
   onDeleteIncident?: (id: string) => void;
+  onOpenDriveModal?: () => void;
 }
 
 const FIELD_ZONES = [
@@ -46,7 +50,8 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   onSubmitIncident,
   myRecentIncidents,
   onTriggerEmergency,
-  onDeleteIncident
+  onDeleteIncident,
+  onOpenDriveModal
 }) => {
   const { isInstallable, install, isIOS } = usePWAInstall();
 
@@ -207,13 +212,21 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
       // ONLINE: Attempt immediate server transmission
       try {
         safetyAudio.playIncidentAlert(selectedSeverity);
-        onSubmitIncident(newIncident);
+        await onSubmitIncident(newIncident);
         setLastSubmittedCode(code);
         setShowSuccessToast(true);
         setTimeout(() => setShowSuccessToast(false), 4500);
+
+        // Check if user is logged into Google Drive (prevred3@gmail.com) for automatic cloud backup
+        const token = await getAccessToken();
+        if (token) {
+          saveIncidentToDrive(token, newIncident).catch((driveErr) => {
+            console.warn('[Google Drive] Respaldo automático falló:', driveErr);
+          });
+        }
       } catch (err) {
         // Transmission error fallback to IndexedDB
-        await enqueueIncident(newIncident, 'Error de red durante transmisión');
+        await enqueueIncident(newIncident, 'Error de red durante transmisión a la Matriz');
         setShowOfflineToast(true);
         setTimeout(() => setShowOfflineToast(false), 5000);
       }
@@ -257,6 +270,18 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Google Drive Button */}
+            {onOpenDriveModal && (
+              <button
+                onClick={onOpenDriveModal}
+                className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono bg-blue-950/80 text-blue-300 border border-blue-800/60 hover:bg-blue-900/80 cursor-pointer transition-colors"
+                title="Alojamiento & Respaldo en Google Drive (prevred3@gmail.com)"
+              >
+                <Cloud className="w-3 h-3 text-blue-400" />
+                <span className="hidden sm:inline">Drive</span>
+              </button>
+            )}
+
             {/* Online/Offline status indicator */}
             <div
               className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono ${
@@ -299,6 +324,39 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
                 iOS
               </button>
             )}
+          </div>
+        </div>
+      </div>
+
+      {/* Satélite-to-Matrix Realtime Bridge Status Card */}
+      <div className="bg-slate-900/80 border-b border-slate-800 px-4 py-2 text-xs">
+        <div className="max-w-md mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-2 text-slate-300">
+            <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+            <span className="text-[11px]">
+              {isOnline ? 'Sincronización en vivo con Matriz' : 'Sin red: Cola IndexedDB'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {onOpenDriveModal && (
+              <button
+                onClick={onOpenDriveModal}
+                className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1 cursor-pointer"
+              >
+                <Cloud className="w-3 h-3" />
+                <span className="hidden xs:inline">prevred3@gmail.com</span>
+                <span className="xs:hidden">Drive</span>
+              </button>
+            )}
+            <button
+              onClick={() => triggerSync(true)}
+              disabled={isSyncing || !isOnline}
+              className="text-[11px] text-amber-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer disabled:opacity-40"
+              title="Forzar sincronización inmediata con la Matriz"
+            >
+              <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+              <span>Sincronizar</span>
+            </button>
           </div>
         </div>
       </div>

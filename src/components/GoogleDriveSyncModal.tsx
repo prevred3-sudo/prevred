@@ -22,7 +22,7 @@ import {
   signInWithGoogleIdentityServices,
   signInWithFirebasePopup
 } from '../utils/firebaseAuth';
-import { uploadMasterSummaryToDrive, listPRLFilesFromDrive, DriveUploadedFile } from '../services/googleDriveService';
+import { uploadMasterSummaryToDrive, listPRLFilesFromDrive, saveIncidentToDrive, DriveUploadedFile } from '../services/googleDriveService';
 
 interface GoogleDriveSyncModalProps {
   isOpen: boolean;
@@ -126,18 +126,32 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
     setErrorMsg('');
   };
 
+  const [syncProgress, setSyncProgress] = useState<string>('');
+
   const handleExecuteSync = async () => {
     if (!token) return;
     setIsSyncing(true);
     setErrorMsg('');
     setSyncSuccessMsg('');
+    setSyncProgress('Iniciando subida de expediente maestro...');
     try {
       const uploadedMaster = await uploadMasterSummaryToDrive(token, incidents);
-      setSyncSuccessMsg(`¡Registro Maestro subido con éxito a Google Drive: ${uploadedMaster.name}!`);
+      
+      // Also upload individual recent reports with photos (up to 5 most recent)
+      const toUpload = incidents.slice(0, 5);
+      for (let i = 0; i < toUpload.length; i++) {
+        const item = toUpload[i];
+        setSyncProgress(`Subiendo reporte ${i + 1}/${toUpload.length}: ${item.code}${item.photoUrl ? ' (con fotografía)' : ''}...`);
+        await saveIncidentToDrive(token, item);
+      }
+
+      setSyncSuccessMsg(`¡Sincronización completa con Google Drive! Se subió el expediente maestro (${uploadedMaster.name}) y los reportes con fotografías.`);
       setConfirmSync(false);
+      setSyncProgress('');
       await loadFiles(token);
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al sincronizar con Google Drive');
+      setSyncProgress('');
     } finally {
       setIsSyncing(false);
     }
@@ -344,13 +358,20 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
               ) : (
                 <div className="p-3 bg-blue-950/40 border border-blue-600/50 rounded-lg space-y-2">
                   <div className="text-xs font-semibold text-blue-200">
-                    ¿Confirmar subida de {incidents.length} informes a la carpeta "PrevRiesgos PRL" de su Google Drive?
+                    ¿Confirmar subida de {incidents.length} informes y evidencias a la carpeta "PrevRiesgos PRL" de su Google Drive?
                   </div>
+                  {syncProgress && (
+                    <div className="p-2 bg-blue-900/40 border border-blue-500/30 rounded text-[11px] text-blue-200 flex items-center gap-2">
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-400 shrink-0" />
+                      <span>{syncProgress}</span>
+                    </div>
+                  )}
                   <div className="flex items-center justify-end gap-2">
                     <button
                       type="button"
                       onClick={() => setConfirmSync(false)}
-                      className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 border border-slate-700 rounded-md"
+                      disabled={isSyncing}
+                      className="px-3 py-1.5 text-xs text-slate-400 hover:text-slate-200 border border-slate-700 rounded-md disabled:opacity-50"
                     >
                       Cancelar
                     </button>
@@ -358,7 +379,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                       type="button"
                       onClick={handleExecuteSync}
                       disabled={isSyncing}
-                      className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md flex items-center gap-1.5 cursor-pointer"
+                      className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                     >
                       {isSyncing && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
                       <span>{isSyncing ? 'Subiendo...' : 'Sí, Sincronizar'}</span>

@@ -237,13 +237,21 @@ export default function App() {
   // If in SATELLITE mode, render the lightweight field app
   if (appMode === 'satellite') {
     return (
-      <SatelliteFieldApp
-        onBackToMatrix={() => handleSetMode('matrix')}
-        onSubmitIncident={handleAddIncident}
-        myRecentIncidents={mySatelliteIncidents}
-        onTriggerEmergency={handleTriggerFieldEmergency}
-        onDeleteIncident={handleDeleteIncident}
-      />
+      <>
+        <SatelliteFieldApp
+          onBackToMatrix={() => handleSetMode('matrix')}
+          onSubmitIncident={handleAddIncident}
+          myRecentIncidents={mySatelliteIncidents.length > 0 ? mySatelliteIncidents : incidents}
+          onTriggerEmergency={handleTriggerFieldEmergency}
+          onDeleteIncident={handleDeleteIncident}
+          onOpenDriveModal={() => setShowDriveModal(true)}
+        />
+        <GoogleDriveSyncModal
+          isOpen={showDriveModal}
+          onClose={() => setShowDriveModal(false)}
+          incidents={incidents}
+        />
+      </>
     );
   }
 
@@ -271,7 +279,7 @@ export default function App() {
               <span className="w-2 h-2 rounded-full bg-amber-400"></span>
               Aplicación Matriz (Centro de Comando & Supervisión PRL)
             </span>
-            <span className="text-slate-500 hidden sm:inline">· Supervisado por prevred@gmail.com</span>
+            <span className="text-slate-500 hidden sm:inline">· Supervisado por prevred3@gmail.com</span>
           </div>
 
           <div className="flex items-center gap-2">
