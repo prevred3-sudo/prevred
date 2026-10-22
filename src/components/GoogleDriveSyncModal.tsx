@@ -10,11 +10,18 @@ import {
   LogOut,
   Download,
   ShieldCheck,
-  HelpCircle
+  Smartphone
 } from 'lucide-react';
 import { Incident } from '../types';
-import { googleSignIn, logoutGoogle, getAccessToken, auth, parseAuthError, AuthErrorDiagnostic } from '../utils/firebaseAuth';
-import { onAuthStateChanged, User } from 'firebase/auth';
+import {
+  googleSignIn,
+  logoutGoogle,
+  getAccessToken,
+  getCurrentAppUser,
+  AppAuthUser,
+  signInWithGoogleIdentityServices,
+  signInWithFirebasePopup
+} from '../utils/firebaseAuth';
 import { uploadMasterSummaryToDrive, listPRLFilesFromDrive, DriveUploadedFile } from '../services/googleDriveService';
 
 interface GoogleDriveSyncModalProps {
@@ -28,31 +35,27 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
   onClose,
   incidents
 }) => {
-  const [user, setUser] = useState<User | null>(auth.currentUser);
+  const [user, setUser] = useState<AppAuthUser | null>(() => getCurrentAppUser());
   const [token, setToken] = useState<string | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<DriveUploadedFile[]>([]);
   const [syncSuccessMsg, setSyncSuccessMsg] = useState('');
-  const [authError, setAuthError] = useState<AuthErrorDiagnostic | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string>('');
   const [confirmSync, setConfirmSync] = useState(false);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    async function checkToken() {
+      const activeToken = await getAccessToken();
+      setToken(activeToken);
+      const currentUser = getCurrentAppUser();
       setUser(currentUser);
-      if (currentUser) {
-        const currentToken = await getAccessToken();
-        setToken(currentToken);
-        if (currentToken) {
-          loadFiles(currentToken);
-        }
-      } else {
-        setToken(null);
-        setUploadedFiles([]);
+      if (activeToken) {
+        loadFiles(activeToken);
       }
-    });
-    return () => unsubscribe();
-  }, []);
+    }
+    checkToken();
+  }, [isOpen]);
 
   const loadFiles = async (authToken: string) => {
     try {
@@ -67,17 +70,48 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
 
   const handleSignIn = async () => {
     setIsSigningIn(true);
-    setAuthError(null);
+    setErrorMsg('');
     try {
-      const result = await googleSignIn();
+      // First try Google Identity Services (GIS direct OAuth) to completely bypass auth/unauthorized-domain
+      let result;
+      try {
+        result = await signInWithGoogleIdentityServices();
+      } catch (gisErr) {
+        console.warn('GSI no completó, intentando Firebase Popup:', gisErr);
+        result = await signInWithFirebasePopup();
+      }
+
       if (result) {
         setUser(result.user);
         setToken(result.accessToken);
         await loadFiles(result.accessToken);
       }
     } catch (err: unknown) {
-      const diag = parseAuthError(err);
-      setAuthError(diag);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('unauthorized-domain')) {
+        setErrorMsg('El dominio del entorno no está en Firebase Auth. Pulsa "Conectar con Google Identity Directo" abajo o abre en una pestaña nueva.');
+      } else if (msg.includes('popup-blocked')) {
+        setErrorMsg('El navegador bloqueó la ventana emergente. Por favor permite pop-ups en la barra de direcciones o abre la app en una pestaña nueva.');
+      } else {
+        setErrorMsg(`Error al conectar con Google: ${msg}`);
+      }
+    } finally {
+      setIsSigningIn(false);
+    }
+  };
+
+  const handleDirectGsiSignIn = async () => {
+    setIsSigningIn(true);
+    setErrorMsg('');
+    try {
+      const result = await signInWithGoogleIdentityServices();
+      if (result) {
+        setUser(result.user);
+        setToken(result.accessToken);
+        await loadFiles(result.accessToken);
+      }
+    } catch (err: unknown) {
+      setErrorMsg(`Error directo GSI: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsSigningIn(false);
     }
@@ -89,13 +123,13 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
     setToken(null);
     setUploadedFiles([]);
     setSyncSuccessMsg('');
-    setAuthError(null);
+    setErrorMsg('');
   };
 
   const handleExecuteSync = async () => {
     if (!token) return;
     setIsSyncing(true);
-    setAuthError(null);
+    setErrorMsg('');
     setSyncSuccessMsg('');
     try {
       const uploadedMaster = await uploadMasterSummaryToDrive(token, incidents);
@@ -103,8 +137,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
       setConfirmSync(false);
       await loadFiles(token);
     } catch (err: unknown) {
-      const diag = parseAuthError(err);
-      setAuthError(diag);
+      setErrorMsg(err instanceof Error ? err.message : 'Error al sincronizar con Google Drive');
     } finally {
       setIsSyncing(false);
     }
@@ -172,20 +205,32 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
               </p>
 
               {/* Official Google Sign-In Styled Button */}
-              <button
-                type="button"
-                onClick={handleSignIn}
-                disabled={isSigningIn}
-                className="inline-flex items-center gap-3 bg-white hover:bg-slate-100 text-slate-900 text-xs font-semibold px-4 py-2.5 rounded-lg border border-slate-300 shadow-sm transition-all cursor-pointer disabled:opacity-50"
-              >
-                <svg className="w-4 h-4" viewBox="0 0 48 48">
-                  <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-                  <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                  <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-                  <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-                </svg>
-                <span>{isSigningIn ? 'Conectando con Google...' : 'Acceder con Google (prevred3@gmail.com)'}</span>
-              </button>
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleSignIn}
+                  disabled={isSigningIn}
+                  className="inline-flex items-center gap-3 bg-white hover:bg-slate-100 text-slate-900 text-xs font-semibold px-4 py-2.5 rounded-lg border border-slate-300 shadow-sm transition-all cursor-pointer disabled:opacity-50"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 48 48">
+                    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                    <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                    <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                  </svg>
+                  <span>{isSigningIn ? 'Conectando...' : 'Acceder con Google (prevred3@gmail.com)'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleDirectGsiSignIn}
+                  disabled={isSigningIn}
+                  className="px-3 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                  title="Conexión directa OAuth 2.0 sin restricciones de dominio"
+                >
+                  Conexión Directa OAuth
+                </button>
+              </div>
             </div>
           ) : (
             <div className="flex items-center justify-between">
@@ -194,7 +239,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                   <img src={user.photoURL} alt="Usuario Google" className="w-9 h-9 rounded-full border border-slate-700" />
                 ) : (
                   <div className="w-9 h-9 rounded-full bg-blue-600 flex items-center justify-center font-bold text-white text-xs">
-                    {user.email?.charAt(0).toUpperCase()}
+                    {user.email?.charAt(0).toUpperCase() || 'P'}
                   </div>
                 )}
                 <div>
@@ -205,7 +250,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                     </span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-400">
-                    {user.email}
+                    {user.email || 'prevred3@gmail.com'}
                   </div>
                 </div>
               </div>
@@ -222,23 +267,30 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
           )}
         </div>
 
-        {/* Detailed Diagnostics Box if Error Occurs */}
-        {authError && (
+        {/* Error Box if Occurs with Bypass Link */}
+        {errorMsg && (
           <div className="p-4 rounded-xl bg-rose-950/50 border border-rose-800/80 text-xs space-y-2.5">
             <div className="flex items-start gap-2.5 text-rose-300">
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
               <div>
                 <div className="font-bold text-rose-200">
-                  Aviso al conectar con Google ({authError.code})
+                  Aviso de conexión
                 </div>
                 <div className="text-rose-300/90 mt-0.5 leading-relaxed">
-                  {authError.userHint}
+                  {errorMsg}
                 </div>
               </div>
             </div>
 
-            {/* Quick Actions to resolve popup/iframe sandbox issues */}
             <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-rose-900/40">
+              <button
+                type="button"
+                onClick={handleDirectGsiSignIn}
+                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <span>Usar Conexión Directa GSI</span>
+              </button>
+
               <a
                 href={typeof window !== 'undefined' ? window.location.href : '#'}
                 target="_blank"
@@ -248,13 +300,6 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                 <ExternalLink className="w-3.5 h-3.5" />
                 <span>Abrir en Pestaña Independiente</span>
               </a>
-
-              <button
-                onClick={handleSignIn}
-                className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-rose-200 border border-rose-800 rounded-lg text-xs font-medium"
-              >
-                Reintentar
-              </button>
             </div>
           </div>
         )}
@@ -313,7 +358,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                       type="button"
                       onClick={handleExecuteSync}
                       disabled={isSyncing}
-                      className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md flex items-center gap-1.5"
+                      className="px-4 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white rounded-md flex items-center gap-1.5 cursor-pointer"
                     >
                       {isSyncing && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
                       <span>{isSyncing ? 'Subiendo...' : 'Sí, Sincronizar'}</span>

@@ -2,8 +2,8 @@ import React from 'react';
 import { Volume2, VolumeX, ShieldAlert, Plus } from 'lucide-react';
 
 interface NavbarProps {
-  currentTab: 'dashboard' | 'incidents' | 'iperc' | 'checklists' | 'emergency';
-  onSelectTab: (tab: 'dashboard' | 'incidents' | 'iperc' | 'checklists' | 'emergency') => void;
+  currentTab: 'dashboard' | 'incidents' | 'checklists' | 'emergency';
+  onSelectTab: (tab: 'dashboard' | 'incidents' | 'checklists' | 'emergency') => void;
   onOpenReportModal: () => void;
   soundEnabled: boolean;
   onToggleSound: () => void;
@@ -71,16 +71,6 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </button>
 
-            <button
-              onClick={() => onSelectTab('iperc')}
-              className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 py-1 ${
-                currentTab === 'iperc'
-                  ? 'text-amber-400 border-b-2 border-amber-400'
-                  : ''
-              }`}
-            >
-              Matriz IPERC
-            </button>
 
             <button
               onClick={() => onSelectTab('checklists')}
@@ -152,12 +142,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             className={`whitespace-nowrap shrink-0 ${currentTab === 'incidents' ? 'text-amber-400 font-bold' : ''}`}
           >
             Incidentes ({openIncidentsCount})
-          </button>
-          <button
-            onClick={() => onSelectTab('iperc')}
-            className={`whitespace-nowrap shrink-0 ${currentTab === 'iperc' ? 'text-amber-400 font-bold' : ''}`}
-          >
-            IPERC
           </button>
           <button
             onClick={() => onSelectTab('checklists')}

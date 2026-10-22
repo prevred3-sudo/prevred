@@ -1,6 +1,16 @@
 import React, { useState } from 'react';
-import { ClipboardCheck, CheckCircle2, XCircle, AlertTriangle, ArrowRight, UserCheck } from 'lucide-react';
-import { InspectionChecklist, Incident } from '../types';
+import {
+  ClipboardCheck,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
+  ArrowRight,
+  UserCheck,
+  Trash2,
+  Plus,
+  RotateCcw
+} from 'lucide-react';
+import { InspectionChecklist, Incident, ChecklistItem } from '../types';
 
 interface SafetyChecklistsViewProps {
   checklists: InspectionChecklist[];
@@ -13,6 +23,9 @@ export const SafetyChecklistsView: React.FC<SafetyChecklistsViewProps> = ({
 }) => {
   const [activeChecklistId, setActiveChecklistId] = useState(checklists[0]?.id || '');
   const [localChecklists, setLocalChecklists] = useState<InspectionChecklist[]>(checklists);
+  const [showAddItem, setShowAddItem] = useState(false);
+  const [newItemLabel, setNewItemLabel] = useState('');
+  const [newItemCategory, setNewItemCategory] = useState('Seguridad Operativa');
 
   const activeChecklist = localChecklists.find((c) => c.id === activeChecklistId) || localChecklists[0];
 
@@ -38,6 +51,68 @@ export const SafetyChecklistsView: React.FC<SafetyChecklistsViewProps> = ({
         };
       })
     );
+  };
+
+  // Eliminate/clear detected finding for a specific checklist item
+  const handleClearFinding = (itemId: string) => {
+    setLocalChecklists((prev) =>
+      prev.map((chk) => {
+        if (chk.id !== activeChecklist.id) return chk;
+        return {
+          ...chk,
+          items: chk.items.map((it) => (it.id === itemId ? { ...it, status: 'pending', observations: '' } : it))
+        };
+      })
+    );
+  };
+
+  // Delete an item permanently from the checklist
+  const handleDeleteItem = (itemId: string) => {
+    setLocalChecklists((prev) =>
+      prev.map((chk) => {
+        if (chk.id !== activeChecklist.id) return chk;
+        return {
+          ...chk,
+          items: chk.items.filter((it) => it.id !== itemId)
+        };
+      })
+    );
+  };
+
+  // Clear all failed findings in the active checklist
+  const handleClearAllFindings = () => {
+    if (!confirm('¿Desea restablecer y eliminar todos los hallazgos no conformes de esta inspección?')) return;
+    setLocalChecklists((prev) =>
+      prev.map((chk) => {
+        if (chk.id !== activeChecklist.id) return chk;
+        return {
+          ...chk,
+          items: chk.items.map((it) => (it.status === 'failed' ? { ...it, status: 'pending', observations: '' } : it))
+        };
+      })
+    );
+  };
+
+  const handleAddNewItem = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newItemLabel.trim()) return;
+    const newItem: ChecklistItem = {
+      id: `chk-item-${Date.now()}`,
+      label: newItemLabel.trim(),
+      category: newItemCategory.trim(),
+      status: 'pending'
+    };
+    setLocalChecklists((prev) =>
+      prev.map((chk) => {
+        if (chk.id !== activeChecklist.id) return chk;
+        return {
+          ...chk,
+          items: [...chk.items, newItem]
+        };
+      })
+    );
+    setNewItemLabel('');
+    setShowAddItem(false);
   };
 
   if (!activeChecklist) return null;
@@ -97,11 +172,80 @@ export const SafetyChecklistsView: React.FC<SafetyChecklistsViewProps> = ({
               <span>Ubicación: <strong className="text-slate-300">{activeChecklist.location}</strong></span>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <UserCheck className="w-4 h-4 text-amber-400" />
-            <span>Inspector: <strong className="text-slate-200">{activeChecklist.inspector}</strong></span>
+
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <UserCheck className="w-4 h-4 text-amber-400" />
+              <span>Inspector: <strong className="text-slate-200">{activeChecklist.inspector}</strong></span>
+            </div>
+
+            {failedCount > 0 && (
+              <button
+                type="button"
+                onClick={handleClearAllFindings}
+                className="px-2.5 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="Restablecer todos los hallazgos no conformes"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Limpiar Hallazgos ({failedCount})</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setShowAddItem(!showAddItem)}
+              className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Agregar Ítem</span>
+            </button>
           </div>
         </div>
+
+        {/* Add Item Inline Form */}
+        {showAddItem && (
+          <form
+            onSubmit={handleAddNewItem}
+            className="p-4 bg-slate-950 border border-amber-500/30 rounded-xl space-y-3 animate-in fade-in"
+          >
+            <div className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
+              <Plus className="w-4 h-4" />
+              <span>Agregar Nuevo Punto de Control / Hallazgo a la Inspección</span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <input
+                type="text"
+                placeholder="Descripción del punto de control..."
+                value={newItemLabel}
+                onChange={(e) => setNewItemLabel(e.target.value)}
+                className="sm:col-span-2 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-400"
+                required
+              />
+              <input
+                type="text"
+                placeholder="Categoría (ej: EPP, LOTO, PCI)"
+                value={newItemCategory}
+                onChange={(e) => setNewItemCategory(e.target.value)}
+                className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-400"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowAddItem(false)}
+                className="px-3 py-1 text-xs text-slate-400 hover:text-slate-200 bg-slate-900 rounded-lg cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                className="px-3 py-1 text-xs font-bold text-slate-950 bg-amber-400 hover:bg-amber-300 rounded-lg cursor-pointer"
+              >
+                Guardar Punto de Inspección
+              </button>
+            </div>
+          </form>
+        )}
 
         {/* Items List */}
         <div className="space-y-3">
@@ -133,6 +277,7 @@ export const SafetyChecklistsView: React.FC<SafetyChecklistsViewProps> = ({
 
                 <div className="flex items-center gap-1.5 self-end sm:self-auto shrink-0">
                   <button
+                    type="button"
                     onClick={() => handleToggleStatus(item.id, 'passed')}
                     className={`px-2.5 py-1 text-xs rounded-lg font-medium transition-colors cursor-pointer flex items-center gap-1 ${
                       item.status === 'passed'
@@ -145,6 +290,7 @@ export const SafetyChecklistsView: React.FC<SafetyChecklistsViewProps> = ({
                   </button>
 
                   <button
+                    type="button"
                     onClick={() => handleToggleStatus(item.id, 'failed')}
                     className={`px-2.5 py-1 text-xs rounded-lg font-medium transition-colors cursor-pointer flex items-center gap-1 ${
                       item.status === 'failed'
@@ -155,24 +301,48 @@ export const SafetyChecklistsView: React.FC<SafetyChecklistsViewProps> = ({
                     <XCircle className="w-3.5 h-3.5" />
                     <span>No Conforme</span>
                   </button>
+
+                  {/* Delete Item Button */}
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteItem(item.id)}
+                    className="p-1 text-slate-600 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors cursor-pointer ml-1"
+                    title="Eliminar este ítem de la lista"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               </div>
 
               {/* Observation field if failed or has note */}
               {item.status === 'failed' && (
                 <div className="p-3 bg-slate-900 rounded-lg border border-rose-900/40 space-y-2">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <span className="text-[11px] text-rose-300 font-semibold flex items-center gap-1">
                       <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
                       <span>Observación del Hallazgo Detectado:</span>
                     </span>
-                    <button
-                      onClick={() => onPromoteFindingToIncident(activeChecklist, item.label, item.observations)}
-                      className="text-xs text-amber-400 hover:text-amber-300 font-bold flex items-center gap-1 underline cursor-pointer"
-                    >
-                      <span>⚡ Convertir en Incidente Abierto en Vivo</span>
-                      <ArrowRight className="w-3 h-3" />
-                    </button>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleClearFinding(item.id)}
+                        className="text-xs text-rose-400 hover:text-rose-300 font-semibold flex items-center gap-1 cursor-pointer transition-colors"
+                        title="Descartar este hallazgo y volver a estado pendiente"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>Eliminar / Descartar Hallazgo</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => onPromoteFindingToIncident(activeChecklist, item.label, item.observations)}
+                        className="text-xs text-amber-400 hover:text-amber-300 font-bold flex items-center gap-1 underline cursor-pointer ml-2"
+                      >
+                        <span>⚡ Convertir en Incidente Abierto</span>
+                        <ArrowRight className="w-3 h-3" />
+                      </button>
+                    </div>
                   </div>
                   <input
                     type="text"

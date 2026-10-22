@@ -6,16 +6,20 @@ interface IncidentDossierModalProps {
   incident: Incident | null;
   onClose: () => void;
   onUpdateIncident: (updated: Incident) => void;
+  onDeleteIncident?: (id: string) => void;
 }
 
 export const IncidentDossierModal: React.FC<IncidentDossierModalProps> = ({
   incident,
   onClose,
-  onUpdateIncident
+  onUpdateIncident,
+  onDeleteIncident
 }) => {
   if (!incident) return null;
 
   const [activeTab, setActiveTab] = useState<'details' | '5whys' | 'actions'>('details');
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Local editable states
   const [status, setStatus] = useState(incident.status);
@@ -112,6 +116,16 @@ export const IncidentDossierModal: React.FC<IncidentDossierModalProps> = ({
               <Printer className="w-4 h-4" />
               <span className="hidden sm:inline">Imprimir Informe</span>
             </button>
+            {onDeleteIncident && (
+              <button
+                onClick={() => setShowDeleteConfirm(true)}
+                className="p-2 text-rose-400 hover:text-rose-300 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 transition-colors cursor-pointer text-xs flex items-center gap-1.5"
+                title="Eliminar este hallazgo o incidente"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span className="hidden sm:inline">Eliminar</span>
+              </button>
+            )}
             <button
               onClick={onClose}
               className="p-1.5 text-slate-400 hover:text-slate-200 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
@@ -399,9 +413,22 @@ export const IncidentDossierModal: React.FC<IncidentDossierModalProps> = ({
         )}
 
         {/* Footer Actions */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-800 bg-slate-950/70 print:hidden">
-          <div className="text-xs text-slate-400">
-            Cambios guardados localmente de forma inmediata.
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-6 py-4 border-t border-slate-800 bg-slate-950/70 print:hidden">
+          <div>
+            {onDeleteIncident ? (
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(true)}
+                className="text-xs text-rose-400 hover:text-rose-300 font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Eliminar este Hallazgo / Incidente</span>
+              </button>
+            ) : (
+              <div className="text-xs text-slate-400">
+                Cambios guardados localmente de forma inmediata.
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-3">
             <button
@@ -419,6 +446,64 @@ export const IncidentDossierModal: React.FC<IncidentDossierModalProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="bg-slate-900 border border-slate-700/80 rounded-2xl max-w-md w-full p-6 text-slate-100 shadow-2xl space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-400 shrink-0">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-slate-100">
+                  ¿Confirmar eliminación de {incident.code}?
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Se eliminará este informe, su análisis de 5 Porqués y todas sus acciones correctivas asociadas de manera permanente.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs font-mono space-y-1">
+              <div className="text-amber-400 font-bold">{incident.code} - {incident.type}</div>
+              <div className="text-slate-300 font-sans">{incident.title}</div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(false)}
+                disabled={isDeleting}
+                className="px-4 py-2 text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-xl transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!onDeleteIncident) return;
+                  setIsDeleting(true);
+                  try {
+                    await onDeleteIncident(incident.id);
+                    setShowDeleteConfirm(false);
+                    onClose();
+                  } catch (err) {
+                    alert('Error al eliminar: ' + (err as Error).message);
+                  } finally {
+                    setIsDeleting(false);
+                  }
+                }}
+                disabled={isDeleting}
+                className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 rounded-xl transition-colors cursor-pointer flex items-center gap-1.5 shadow-lg shadow-rose-900/40"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeleting ? 'Eliminando...' : 'Sí, Eliminar Definitivamente'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

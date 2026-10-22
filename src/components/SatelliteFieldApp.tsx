@@ -13,17 +13,23 @@ import {
   Smartphone,
   Sparkles,
   History,
-  RotateCcw
+  RotateCcw,
+  RefreshCw,
+  Clock,
+  Database,
+  Trash2
 } from 'lucide-react';
 import { Incident, IncidentType, SeverityLevel } from '../types';
 import { safetyAudio } from '../utils/audioAlert';
-import { usePWAInstall, useOnlineStatus } from '../utils/usePWAInstall';
+import { usePWAInstall } from '../utils/usePWAInstall';
+import { useOfflineSyncQueue } from '../utils/useOfflineSyncQueue';
 
 interface SatelliteFieldAppProps {
   onBackToMatrix: () => void;
   onSubmitIncident: (incident: Incident) => void;
   myRecentIncidents: Incident[];
   onTriggerEmergency: (location: string, message: string) => void;
+  onDeleteIncident?: (id: string) => void;
 }
 
 const FIELD_ZONES = [
@@ -39,10 +45,24 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   onBackToMatrix,
   onSubmitIncident,
   myRecentIncidents,
-  onTriggerEmergency
+  onTriggerEmergency,
+  onDeleteIncident
 }) => {
-  const isOnline = useOnlineStatus();
   const { isInstallable, install, isIOS } = usePWAInstall();
+
+  // Integrated Offline Sync Queue with IndexedDB & Exponential Backoff
+  const {
+    isOnline,
+    pendingCount,
+    pendingItems,
+    isSyncing,
+    lastSyncResult,
+    triggerSync,
+    enqueueIncident,
+    removeOfflineItem
+  } = useOfflineSyncQueue((syncedIncident) => {
+    onSubmitIncident(syncedIncident);
+  });
 
   // Field Form State
   const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
@@ -54,11 +74,13 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   const [workerName, setWorkerName] = useState('Operador Terreno');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
+  const [showOfflineToast, setShowOfflineToast] = useState(false);
   const [lastSubmittedCode, setLastSubmittedCode] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const [showEppPass, setShowEppPass] = useState(false);
   const [showEmergencyConfirm, setShowEmergencyConfirm] = useState(false);
   const [showIOSModal, setShowIOSModal] = useState(false);
+  const [activeTabHistory, setActiveTabHistory] = useState<'sent' | 'offline_queue'>('sent');
 
   // Daily EPP Pass states
   const [eppChecks, setEppChecks] = useState({
@@ -76,7 +98,33 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
       const reader = new FileReader();
       reader.onloadend = () => {
         if (typeof reader.result === 'string') {
-          setCapturedPhoto(reader.result);
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            const MAX_DIM = 1280;
+            let width = img.width;
+            let height = img.height;
+
+            if (width > height && width > MAX_DIM) {
+              height = Math.round((height * MAX_DIM) / width);
+              width = MAX_DIM;
+            } else if (height > MAX_DIM) {
+              width = Math.round((width * MAX_DIM) / height);
+              height = MAX_DIM;
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(img, 0, 0, width, height);
+              const compressed = canvas.toDataURL('image/jpeg', 0.82);
+              setCapturedPhoto(compressed);
+            } else {
+              setCapturedPhoto(reader.result as string);
+            }
+          };
+          img.src = reader.result;
         }
       };
       reader.readAsDataURL(file);
@@ -100,7 +148,7 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
     }
   };
 
-  const handleSendReport = (e: React.FormEvent) => {
+  const handleSendReport = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!note.trim() && !capturedPhoto) {
       alert('Por favor tome una foto o escriba una breve descripción del hallazgo.');
@@ -144,21 +192,39 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
       ]
     };
 
-    safetyAudio.playIncidentAlert(selectedSeverity);
-    onSubmitIncident(newIncident);
+    if (!isOnline) {
+      // OFFLINE MODE: Store directly in IndexedDB queue for automatic exponential backoff retry
+      try {
+        await enqueueIncident(newIncident, 'Almacenado localmente en IndexedDB por falta de conexión.');
+        safetyAudio.playIncidentAlert('Moderado');
+        setLastSubmittedCode(code);
+        setShowOfflineToast(true);
+        setTimeout(() => setShowOfflineToast(false), 5000);
+      } catch (err) {
+        console.error('Error al encolar en IndexedDB:', err);
+      }
+    } else {
+      // ONLINE: Attempt immediate server transmission
+      try {
+        safetyAudio.playIncidentAlert(selectedSeverity);
+        onSubmitIncident(newIncident);
+        setLastSubmittedCode(code);
+        setShowSuccessToast(true);
+        setTimeout(() => setShowSuccessToast(false), 4500);
+      } catch (err) {
+        // Transmission error fallback to IndexedDB
+        await enqueueIncident(newIncident, 'Error de red durante transmisión');
+        setShowOfflineToast(true);
+        setTimeout(() => setShowOfflineToast(false), 5000);
+      }
+    }
 
-    setLastSubmittedCode(code);
     setIsSubmitting(false);
-    setShowSuccessToast(true);
 
     // Reset simple form
     setNote('');
     setCapturedPhoto(null);
     setGpsLocation('');
-
-    setTimeout(() => {
-      setShowSuccessToast(false);
-    }, 4500);
   };
 
   const handleTriggerSOS = () => {
@@ -191,14 +257,14 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Online/Offline indicator */}
+            {/* Online/Offline status indicator */}
             <div
               className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono ${
                 isOnline
                   ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/60'
-                  : 'bg-amber-950/80 text-amber-300 border border-amber-800/60'
+                  : 'bg-rose-950/80 text-rose-300 border border-rose-800/60 animate-pulse'
               }`}
-              title={isOnline ? 'En línea con Matriz' : 'Sin conexión. Se sincronizará localmente'}
+              title={isOnline ? 'En línea con la Matriz' : 'Sin conexión: Modo Offline activo con IndexedDB'}
             >
               {isOnline ? (
                 <>
@@ -207,8 +273,8 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
                 </>
               ) : (
                 <>
-                  <WifiOff className="w-3 h-3 text-amber-400" />
-                  <span className="hidden sm:inline">Local</span>
+                  <WifiOff className="w-3 h-3 text-rose-400" />
+                  <span>Offline</span>
                 </>
               )}
             </div>
@@ -236,6 +302,36 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Offline Queue Reattempt & Backoff Status Strip */}
+      {pendingCount > 0 && (
+        <div className="bg-amber-950/90 border-b border-amber-600/40 px-4 py-2.5 text-xs text-amber-200 shadow-md">
+          <div className="max-w-md mx-auto flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Database className="w-4 h-4 text-amber-400 shrink-0" />
+              <div>
+                <span className="font-bold text-amber-100">
+                  {pendingCount} en cola IndexedDB
+                </span>
+                <span className="text-amber-300/80 block text-[11px]">
+                  {isOnline ? 'Reintentando con backoff exponencial...' : 'Se enviarán al recuperar señal'}
+                </span>
+              </div>
+            </div>
+
+            {isOnline && (
+              <button
+                onClick={() => triggerSync(true)}
+                disabled={isSyncing}
+                className="px-2.5 py-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded text-[11px] flex items-center gap-1 cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+                <span>{isSyncing ? 'Enviando...' : 'Reintentar'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Main Field Container (Max-w-md designed for mobile screen & quick thumbs) */}
       <main className="max-w-md w-full mx-auto px-4 pt-4 flex-1 flex flex-col space-y-4">
@@ -267,10 +363,15 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
             </button>
             <button
               onClick={() => setShowHistory(!showHistory)}
-              className="p-2 text-slate-400 hover:text-amber-400 bg-slate-950 border border-slate-800 rounded-lg text-xs font-medium cursor-pointer"
-              title="Mis envíos"
+              className="p-2 text-slate-400 hover:text-amber-400 bg-slate-950 border border-slate-800 rounded-lg text-xs font-medium cursor-pointer relative"
+              title="Mis envíos y cola offline"
             >
               <History className="w-4 h-4" />
+              {pendingCount > 0 && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 text-slate-950 text-[10px] font-bold rounded-full flex items-center justify-center font-mono">
+                  {pendingCount}
+                </span>
+              )}
             </button>
           </div>
         </div>
@@ -357,18 +458,43 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
           </button>
         </div>
 
-        {/* Success Toast */}
+        {/* Online Success Toast */}
         {showSuccessToast && (
           <div className="bg-emerald-950/90 border border-emerald-500/40 rounded-xl p-4 text-emerald-200 flex items-start gap-3 shadow-xl">
             <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
             <div>
               <div className="text-xs font-bold text-emerald-100">
-                ¡Hallazgo Registrado con Éxito!
+                ¡Hallazgo Transmitido a la Matriz!
               </div>
               <div className="text-xs text-emerald-300 mt-0.5">
-                Transmitido a la Matriz PRL bajo código <span className="font-mono font-bold">{lastSubmittedCode}</span>.
+                Registrado bajo código <span className="font-mono font-bold">{lastSubmittedCode}</span> con fotografía en tiempo real.
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Offline Saved in IndexedDB Toast */}
+        {showOfflineToast && (
+          <div className="bg-amber-950/90 border border-amber-500/40 rounded-xl p-4 text-amber-200 flex items-start gap-3 shadow-xl">
+            <Database className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="text-xs font-bold text-amber-100">
+                Guardado en Modo Offline (IndexedDB)
+              </div>
+              <div className="text-xs text-amber-300/90 mt-0.5 leading-relaxed">
+                Sin señal en terreno. El reporte y la foto quedaron almacenados localmente y se transmitirán automáticamente a la Matriz con reintento exponencial al volver a conectarte.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Success sync feedback */}
+        {lastSyncResult && lastSyncResult.synced > 0 && (
+          <div className="bg-blue-950/90 border border-blue-500/40 rounded-xl p-3 text-blue-200 flex items-center gap-2.5 text-xs">
+            <CheckCircle2 className="w-4 h-4 text-blue-400 shrink-0" />
+            <span>
+              ¡{lastSyncResult.synced} reporte(s) offline sincronizado(s) exitosamente con la Matriz!
+            </span>
           </div>
         )}
 
@@ -525,53 +651,171 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
             className="w-full py-3.5 px-4 bg-amber-400 hover:bg-amber-300 active:bg-amber-500 text-slate-950 font-bold text-sm rounded-xl transition-all shadow-lg shadow-amber-950/60 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.98]"
           >
             <Send className="w-4 h-4 text-slate-950" />
-            <span>{isSubmitting ? 'ENVIANDO A MATRIZ...' : 'ENVIAR REPORTE EN TIEMPO REAL'}</span>
+            <span>
+              {isSubmitting
+                ? 'PROCESANDO...'
+                : !isOnline
+                ? 'GUARDAR OFFLINE (SE ENVIARÁ CON SEÑAL)'
+                : 'ENVIAR REPORTE A MATRIZ'}
+            </span>
           </button>
         </form>
 
-        {/* Field History View */}
+        {/* Field History & Offline Queue View */}
         {showHistory && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
-                <History className="w-4 h-4 text-amber-400" />
-                <span>Mis Últimos Reportes de Terreno</span>
-              </h3>
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+              <div className="flex items-center gap-2 text-xs font-bold">
+                <button
+                  type="button"
+                  onClick={() => setActiveTabHistory('sent')}
+                  className={`py-1 px-2.5 rounded-lg cursor-pointer transition-colors ${
+                    activeTabHistory === 'sent'
+                      ? 'bg-amber-400 text-slate-950'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Transmitidos ({myRecentIncidents.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTabHistory('offline_queue')}
+                  className={`py-1 px-2.5 rounded-lg cursor-pointer transition-colors flex items-center gap-1 ${
+                    activeTabHistory === 'offline_queue'
+                      ? 'bg-amber-400 text-slate-950'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <span>IndexedDB Offline</span>
+                  {pendingCount > 0 && (
+                    <span className="font-mono text-[10px] bg-amber-600 text-white px-1.5 rounded-full">
+                      {pendingCount}
+                    </span>
+                  )}
+                </button>
+              </div>
+
               <button
                 onClick={() => setShowHistory(false)}
-                className="text-xs text-slate-400 hover:text-slate-200"
+                className="text-xs text-slate-400 hover:text-slate-200 cursor-pointer"
               >
-                Ocultar
+                Cerrar
               </button>
             </div>
 
-            {myRecentIncidents.length === 0 ? (
-              <p className="text-xs text-slate-500 text-center py-4">
-                No has emitido reportes en esta sesión.
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {myRecentIncidents.slice(0, 4).map((inc) => (
-                  <div
-                    key={inc.id}
-                    className="p-2.5 bg-slate-950 rounded-xl border border-slate-800 flex items-start justify-between gap-2"
-                  >
-                    <div>
-                      <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
-                        <span className="text-amber-400 font-bold">{inc.code}</span>
-                        <span>·</span>
-                        <span>{inc.location}</span>
+            {/* Sub-tab 1: Sent Incidents */}
+            {activeTabHistory === 'sent' && (
+              myRecentIncidents.length === 0 ? (
+                <p className="text-xs text-slate-500 text-center py-4">
+                  No has emitido reportes en esta sesión.
+                </p>
+              ) : (
+                <div className="space-y-2 max-h-60 overflow-y-auto">
+                  {myRecentIncidents.slice(0, 6).map((inc) => (
+                    <div
+                      key={inc.id}
+                      className="p-2.5 bg-slate-950 rounded-xl border border-slate-800 flex items-start justify-between gap-2 text-xs"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
+                          <span className="text-amber-400 font-bold">{inc.code}</span>
+                          <span>·</span>
+                          <span className="truncate max-w-[130px]">{inc.location}</span>
+                        </div>
+                        <div className="text-xs font-semibold text-slate-200 mt-0.5 line-clamp-1">
+                          {inc.title}
+                        </div>
                       </div>
-                      <div className="text-xs font-semibold text-slate-200 mt-0.5 line-clamp-1">
-                        {inc.title}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <span className="text-[10px] px-2 py-0.5 rounded font-mono bg-emerald-950 text-emerald-300 border border-emerald-800">
+                          En Matriz
+                        </span>
+                        {onDeleteIncident && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (confirm(`¿Eliminar reporte ${inc.code}?`)) {
+                                onDeleteIncident(inc.id);
+                              }
+                            }}
+                            className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors cursor-pointer"
+                            title="Eliminar reporte"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <span className="text-[10px] px-2 py-0.5 rounded font-mono bg-slate-800 text-slate-300 shrink-0">
-                      {inc.status}
-                    </span>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )
+            )}
+
+            {/* Sub-tab 2: Offline Pending Queue in IndexedDB */}
+            {activeTabHistory === 'offline_queue' && (
+              pendingItems.length === 0 ? (
+                <p className="text-xs text-slate-500 text-center py-4">
+                  No hay reportes pendientes en IndexedDB. Todo sincronizado.
+                </p>
+              ) : (
+                <div className="space-y-2 max-h-60 overflow-y-auto">
+                  {pendingItems.map((item) => (
+                    <div
+                      key={item.id}
+                      className="p-2.5 bg-slate-950 rounded-xl border border-amber-900/60 text-xs space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono font-bold text-amber-400">
+                          {item.incident.code}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-mono text-amber-300 bg-amber-950/80 px-2 py-0.5 rounded">
+                            Reintentos: {item.retryCount}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (confirm(`¿Descartar este reporte no sincronizado (${item.incident.code})?`)) {
+                                removeOfflineItem(item.id);
+                              }
+                            }}
+                            className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors cursor-pointer"
+                            title="Descartar reporte pendiente"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="text-slate-200 font-medium line-clamp-1">
+                        {item.incident.title}
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-800">
+                        <span className="flex items-center gap-1">
+                          <Clock className="w-3 h-3 text-amber-400" />
+                          <span>Guardado en IndexedDB</span>
+                        </span>
+                        {item.lastError && (
+                          <span className="text-rose-400 truncate max-w-[120px]">
+                            {item.lastError}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+
+                  {isOnline && (
+                    <button
+                      type="button"
+                      onClick={() => triggerSync(true)}
+                      disabled={isSyncing}
+                      className="w-full py-2 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 cursor-pointer mt-2"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                      <span>{isSyncing ? 'Transmitiendo a Matriz...' : 'Sincronizar Todo Ahora'}</span>
+                    </button>
+                  )}
+                </div>
+              )
             )}
           </div>
         )}

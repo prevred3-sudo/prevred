@@ -3,7 +3,6 @@ import { Navbar } from './components/Navbar';
 import { EmergencyBanner } from './components/EmergencyBanner';
 import { DashboardView } from './components/DashboardView';
 import { IncidentLiveStreamView } from './components/IncidentLiveStreamView';
-import { RiskMatrixView } from './components/RiskMatrixView';
 import { SafetyChecklistsView } from './components/SafetyChecklistsView';
 import { EmergencyCenterView } from './components/EmergencyCenterView';
 import { SatelliteFieldApp } from './components/SatelliteFieldApp';
@@ -13,12 +12,19 @@ import { QrCodeModal } from './components/QrCodeModal';
 import { GoogleDriveSyncModal } from './components/GoogleDriveSyncModal';
 import {
   INITIAL_INCIDENTS,
-  INITIAL_RISKS,
   INITIAL_CHECKLISTS,
   INITIAL_EMERGENCY
 } from './data/initialData';
-import { Incident, RiskItem, InspectionChecklist, EmergencyState } from './types';
+import { Incident, InspectionChecklist, EmergencyState } from './types';
 import { safetyAudio } from './utils/audioAlert';
+import {
+  fetchIncidentsApi,
+  createIncidentApi,
+  updateIncidentApi,
+  deleteIncidentApi,
+  fetchEmergencyApi,
+  updateEmergencyApi
+} from './services/api';
 
 export default function App() {
   // Application Mode: 'matrix' (Central Command & Prevention) or 'satellite' (Field Worker Mobile App)
@@ -46,7 +52,7 @@ export default function App() {
   };
 
   // Navigation tab inside Matrix
-  const [currentTab, setCurrentTab] = useState<'dashboard' | 'incidents' | 'iperc' | 'checklists' | 'emergency'>('dashboard');
+  const [currentTab, setCurrentTab] = useState<'dashboard' | 'incidents' | 'checklists' | 'emergency'>('dashboard');
 
   // Sound preference
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -58,15 +64,6 @@ export default function App() {
       return saved ? JSON.parse(saved) : INITIAL_INCIDENTS;
     } catch {
       return INITIAL_INCIDENTS;
-    }
-  });
-
-  const [risks, setRisks] = useState<RiskItem[]>(() => {
-    try {
-      const saved = localStorage.getItem('prev_risks');
-      return saved ? JSON.parse(saved) : INITIAL_RISKS;
-    } catch {
-      return INITIAL_RISKS;
     }
   });
 
@@ -99,7 +96,57 @@ export default function App() {
   // Field submissions tracked for satellite history
   const [mySatelliteIncidents, setMySatelliteIncidents] = useState<Incident[]>([]);
 
-  // Persist data changes
+  // 1. Initial server fetch
+  useEffect(() => {
+    async function initServerSync() {
+      const serverList = await fetchIncidentsApi();
+      if (serverList && serverList.length > 0) {
+        setIncidents(serverList);
+      }
+      const serverEm = await fetchEmergencyApi();
+      if (serverEm) {
+        setEmergency(serverEm);
+      }
+    }
+    initServerSync();
+  }, []);
+
+  // 2. Real-time background poll (every 2.5 seconds) so field reports appear live on Matrix
+  useEffect(() => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const latest = await fetchIncidentsApi();
+        if (latest && latest.length > 0) {
+          setIncidents((current) => {
+            // If new incidents arrived from external device (satellite worker)
+            if (latest.length > current.length) {
+              const newest = latest[0];
+              if (newest && !current.some((c) => c.id === newest.id)) {
+                safetyAudio.playIncidentAlert(newest.severity);
+              }
+            }
+            return latest;
+          });
+        }
+
+        const em = await fetchEmergencyApi();
+        if (em) {
+          setEmergency((prev) => {
+            if (!prev.active && em.active) {
+              safetyAudio.playEmergencySiren();
+            }
+            return em;
+          });
+        }
+      } catch {
+        // Silent sync catch
+      }
+    }, 2500);
+
+    return () => clearInterval(pollInterval);
+  }, []);
+
+  // Persist data changes to localStorage
   useEffect(() => {
     try {
       localStorage.setItem('prev_incidents', JSON.stringify(incidents));
@@ -108,13 +155,6 @@ export default function App() {
     }
   }, [incidents]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem('prev_risks', JSON.stringify(risks));
-    } catch {
-      // Storage quota fallback
-    }
-  }, [risks]);
 
   useEffect(() => {
     try {
@@ -138,7 +178,8 @@ export default function App() {
     safetyAudio.soundEnabled = next;
   };
 
-  const handleAddIncident = (newIncident: Incident) => {
+  const handleAddIncident = async (newIncident: Incident) => {
+    // Optimistic UI update
     setIncidents((prev) => [newIncident, ...prev]);
     setMySatelliteIncidents((prev) => [newIncident, ...prev]);
     safetyAudio.playIncidentAlert(newIncident.severity);
@@ -147,17 +188,47 @@ export default function App() {
     if (newIncident.type === 'Accidente con Baja (LTI)') {
       setDaysWithoutLTI(0);
     }
+
+    // Immediately transmit to shared Express server so Matrix receives it in real time
+    try {
+      const saved = await createIncidentApi(newIncident);
+      if (saved) {
+        setIncidents((prev) => prev.map((i) => (i.id === newIncident.id ? saved : i)));
+      }
+      return saved;
+    } catch (err) {
+      console.warn('Fallo al guardar en servidor:', err);
+      throw err;
+    }
   };
 
-  const handleUpdateIncident = (updated: Incident) => {
+  const handleUpdateIncident = async (updated: Incident) => {
     setIncidents((prev) =>
       prev.map((i) => (i.id === updated.id ? updated : i))
     );
+    try {
+      await updateIncidentApi(updated);
+    } catch (err) {
+      console.warn('Fallo al actualizar incidente:', err);
+    }
   };
 
-  const handleAddRisk = (newRisk: RiskItem) => {
-    setRisks((prev) => [newRisk, ...prev]);
+  const handleDeleteIncident = async (id: string) => {
+    // 1. Optimistic removal from state
+    setIncidents((prev) => prev.filter((i) => i.id !== id));
+    setMySatelliteIncidents((prev) => prev.filter((i) => i.id !== id));
+    if (selectedIncidentForDossier?.id === id) {
+      setSelectedIncidentForDossier(null);
+    }
+
+    // 2. Call backend DELETE endpoint
+    try {
+      await deleteIncidentApi(id);
+    } catch (err) {
+      console.warn('Fallo al eliminar incidente en backend:', err);
+    }
   };
+
 
   // Convert an inspection finding directly into an open incident in real time
   const handlePromoteFindingToIncident = (
@@ -280,6 +351,7 @@ export default function App() {
         onSubmitIncident={handleAddIncident}
         myRecentIncidents={mySatelliteIncidents}
         onTriggerEmergency={handleTriggerFieldEmergency}
+        onDeleteIncident={handleDeleteIncident}
       />
     );
   }
@@ -349,6 +421,7 @@ export default function App() {
             onSelectIncident={(inc) => setSelectedIncidentForDossier(inc)}
             onSimulateLiveIncident={handleSimulateLiveIncoming}
             daysWithoutLTI={daysWithoutLTI}
+            onDeleteIncident={handleDeleteIncident}
           />
         )}
 
@@ -358,15 +431,10 @@ export default function App() {
             onSelectIncident={(inc) => setSelectedIncidentForDossier(inc)}
             onOpenReportModal={() => setShowReportModal(true)}
             onOpenDriveModal={() => setShowDriveModal(true)}
+            onDeleteIncident={handleDeleteIncident}
           />
         )}
 
-        {currentTab === 'iperc' && (
-          <RiskMatrixView
-            risks={risks}
-            onAddRisk={handleAddRisk}
-          />
-        )}
 
         {currentTab === 'checklists' && (
           <SafetyChecklistsView
@@ -395,6 +463,7 @@ export default function App() {
         incident={selectedIncidentForDossier}
         onClose={() => setSelectedIncidentForDossier(null)}
         onUpdateIncident={handleUpdateIncident}
+        onDeleteIncident={handleDeleteIncident}
       />
 
       <QrCodeModal

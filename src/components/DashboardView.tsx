@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   ShieldAlert,
   Clock,
@@ -10,7 +10,8 @@ import {
   ArrowRight,
   TrendingUp,
   MapPin,
-  Radio
+  Radio,
+  Trash2
 } from 'lucide-react';
 import { Incident } from '../types';
 
@@ -23,6 +24,7 @@ interface DashboardViewProps {
   onSelectIncident: (incident: Incident) => void;
   onSimulateLiveIncident: () => void;
   daysWithoutLTI: number;
+  onDeleteIncident?: (id: string) => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -33,8 +35,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenDriveModal,
   onSelectIncident,
   onSimulateLiveIncident,
-  daysWithoutLTI
+  daysWithoutLTI,
+  onDeleteIncident
 }) => {
+  const [incidentToDelete, setIncidentToDelete] = useState<Incident | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const openIncidents = incidents.filter((i) => i.status !== 'Cerrado');
   const nearMisses = incidents.filter((i) => i.type === 'Casi Accidente (Near Miss)');
   
@@ -300,10 +305,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       {incident.status}
                     </td>
                     <td className="py-3 px-3 text-right whitespace-nowrap">
-                      <span className="text-amber-400 group-hover:translate-x-0.5 inline-flex items-center gap-1 text-xs font-semibold">
-                        Investigar
-                        <ArrowRight className="w-3.5 h-3.5" />
-                      </span>
+                      <div className="inline-flex items-center gap-2 justify-end">
+                        {onDeleteIncident && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setIncidentToDelete(incident);
+                            }}
+                            className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition-colors cursor-pointer"
+                            title="Eliminar este hallazgo o incidente"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        <span className="text-amber-400 group-hover:translate-x-0.5 inline-flex items-center gap-1 text-xs font-semibold">
+                          Investigar
+                          <ArrowRight className="w-3.5 h-3.5" />
+                        </span>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -312,6 +332,63 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </table>
         </div>
       </div>
+
+      {/* Delete Confirmation Modal for Dashboard */}
+      {incidentToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-150">
+          <div className="bg-slate-900 border border-slate-700/80 rounded-2xl max-w-md w-full p-6 text-slate-100 shadow-2xl space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-400 shrink-0">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-slate-100">
+                  ¿Eliminar este hallazgo o incidente?
+                </h3>
+                <p className="text-xs text-slate-400">
+                  El registro será eliminado de la lista central y del servidor.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs font-mono space-y-1">
+              <div className="text-amber-400 font-bold">{incidentToDelete.code} - {incidentToDelete.type}</div>
+              <div className="text-slate-300 font-sans line-clamp-1">{incidentToDelete.title}</div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setIncidentToDelete(null)}
+                disabled={isDeleting}
+                className="px-4 py-2 text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-xl transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!onDeleteIncident) return;
+                  setIsDeleting(true);
+                  try {
+                    await onDeleteIncident(incidentToDelete.id);
+                    setIncidentToDelete(null);
+                  } catch (err) {
+                    alert('Error al eliminar: ' + (err as Error).message);
+                  } finally {
+                    setIsDeleting(false);
+                  }
+                }}
+                disabled={isDeleting}
+                className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 rounded-xl transition-colors cursor-pointer flex items-center gap-1.5 shadow-lg shadow-rose-900/40"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeleting ? 'Eliminando...' : 'Sí, Eliminar Registro'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
