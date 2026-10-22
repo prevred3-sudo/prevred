@@ -1,0 +1,6 @@
+{
+  "name": "PrevRiesgos · Gestión PRL & Registro en Tiempo Real",
+  "description": "Sistema integral de prevención de riesgos laborales (PRL/HSE), matriz IPERC, registro de incidentes en tiempo real y protocolos de emergencia industrial.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
