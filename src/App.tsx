@@ -1,29 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar';
-import { EmergencyBanner } from './components/EmergencyBanner';
 import { DashboardView } from './components/DashboardView';
 import { IncidentLiveStreamView } from './components/IncidentLiveStreamView';
-import { SafetyChecklistsView } from './components/SafetyChecklistsView';
-import { EmergencyCenterView } from './components/EmergencyCenterView';
 import { SatelliteFieldApp } from './components/SatelliteFieldApp';
 import { NewIncidentModal } from './components/NewIncidentModal';
 import { IncidentDossierModal } from './components/IncidentDossierModal';
 import { QrCodeModal } from './components/QrCodeModal';
 import { GoogleDriveSyncModal } from './components/GoogleDriveSyncModal';
 import {
-  INITIAL_INCIDENTS,
-  INITIAL_CHECKLISTS,
-  INITIAL_EMERGENCY
+  INITIAL_INCIDENTS
 } from './data/initialData';
-import { Incident, InspectionChecklist, EmergencyState } from './types';
+import { Incident } from './types';
 import { safetyAudio } from './utils/audioAlert';
 import {
   fetchIncidentsApi,
   createIncidentApi,
   updateIncidentApi,
-  deleteIncidentApi,
-  fetchEmergencyApi,
-  updateEmergencyApi
+  deleteIncidentApi
 } from './services/api';
 
 export default function App() {
@@ -52,7 +45,7 @@ export default function App() {
   };
 
   // Navigation tab inside Matrix
-  const [currentTab, setCurrentTab] = useState<'dashboard' | 'incidents' | 'checklists' | 'emergency'>('dashboard');
+  const [currentTab, setCurrentTab] = useState<'dashboard' | 'incidents'>('dashboard');
 
   // Sound preference
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -64,24 +57,6 @@ export default function App() {
       return saved ? JSON.parse(saved) : INITIAL_INCIDENTS;
     } catch {
       return INITIAL_INCIDENTS;
-    }
-  });
-
-  const [checklists, setChecklists] = useState<InspectionChecklist[]>(() => {
-    try {
-      const saved = localStorage.getItem('prev_checklists');
-      return saved ? JSON.parse(saved) : INITIAL_CHECKLISTS;
-    } catch {
-      return INITIAL_CHECKLISTS;
-    }
-  });
-
-  const [emergency, setEmergency] = useState<EmergencyState>(() => {
-    try {
-      const saved = localStorage.getItem('prev_emergency');
-      return saved ? JSON.parse(saved) : INITIAL_EMERGENCY;
-    } catch {
-      return INITIAL_EMERGENCY;
     }
   });
 
@@ -102,10 +77,6 @@ export default function App() {
       const serverList = await fetchIncidentsApi();
       if (serverList && serverList.length > 0) {
         setIncidents(serverList);
-      }
-      const serverEm = await fetchEmergencyApi();
-      if (serverEm) {
-        setEmergency(serverEm);
       }
     }
     initServerSync();
@@ -128,16 +99,6 @@ export default function App() {
             return latest;
           });
         }
-
-        const em = await fetchEmergencyApi();
-        if (em) {
-          setEmergency((prev) => {
-            if (!prev.active && em.active) {
-              safetyAudio.playEmergencySiren();
-            }
-            return em;
-          });
-        }
       } catch {
         // Silent sync catch
       }
@@ -154,23 +115,6 @@ export default function App() {
       // Storage quota fallback
     }
   }, [incidents]);
-
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('prev_checklists', JSON.stringify(checklists));
-    } catch {
-      // Storage quota fallback
-    }
-  }, [checklists]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('prev_emergency', JSON.stringify(emergency));
-    } catch {
-      // Storage quota fallback
-    }
-  }, [emergency]);
 
   const handleToggleSound = () => {
     const next = !soundEnabled;
@@ -230,63 +174,10 @@ export default function App() {
   };
 
 
-  // Convert an inspection finding directly into an open incident in real time
-  const handlePromoteFindingToIncident = (
-    checklist: InspectionChecklist,
-    itemLabel: string,
-    observation?: string
-  ) => {
-    const code = `INC-2026-${String(incidents.length + 43).padStart(3, '0')}`;
-    const newInc: Incident = {
-      id: `inc-${Date.now()}`,
-      code,
-      timestamp: new Date().toISOString(),
-      timeFormatted: 'Registrado ahora mismo (Desde Auditoría)',
-      title: `No Conformidad: ${itemLabel}`,
-      description: `Hallazgo detectado en inspección "${checklist.title}" en ${checklist.location}. ${observation ? `Observación: ${observation}` : ''}`,
-      location: checklist.location,
-      type: 'Condición Insegura',
-      severity: 'Moderado',
-      status: 'Abierto',
-      reporterName: checklist.inspector,
-      reporterRole: 'Inspector de Seguridad',
-      immediateAction: 'Señalización preventiva del elemento no conforme y notificación a jefatura.',
-      rootCauseAnalysis: {
-        why1: '',
-        why2: '',
-        why3: '',
-        why4: '',
-        why5: '',
-        rootCauseSummary: ''
-      },
-      correctiveActions: [
-        {
-          action: `Subsanar no conformidad detectada en ${itemLabel}.`,
-          assignee: 'Equipo de Mantenimiento / Seguridad',
-          dueDate: '24 horas',
-          completed: false,
-          priority: 'Alta'
-        }
-      ]
-    };
-
-    handleAddIncident(newInc);
-    setCurrentTab('incidents');
-    setSelectedIncidentForDossier(newInc);
-  };
-
-  // Trigger emergency from satellite field
+  // Trigger emergency notice from satellite field
   const handleTriggerFieldEmergency = (location: string, message: string) => {
-    setEmergency({
-      active: true,
-      type: 'Evacuación General',
-      location,
-      triggeredAt: new Date().toLocaleTimeString('es-ES'),
-      message,
-      accountedWorkers: 10,
-      totalWorkers: 150,
-      assemblyPoint: 'Punto de Encuentro 1 (Zona Norte)'
-    });
+    safetyAudio.playEmergencySiren();
+    console.warn(`Alerta de Terreno en ${location}: ${message}`);
   };
 
   // Real-time Simulation Helper
@@ -369,14 +260,6 @@ export default function App() {
         soundEnabled={soundEnabled}
         onToggleSound={handleToggleSound}
         openIncidentsCount={openIncidentsCount}
-        hasActiveEmergency={emergency.active}
-      />
-
-      {/* Emergency Active Broadcast Banner */}
-      <EmergencyBanner
-        emergency={emergency}
-        onGoToEmergency={() => setCurrentTab('emergency')}
-        onResolveEmergency={() => setEmergency({ ...emergency, active: false })}
       />
 
       {/* Mode Switcher floating strip at the top of content */}
@@ -432,21 +315,6 @@ export default function App() {
             onOpenReportModal={() => setShowReportModal(true)}
             onOpenDriveModal={() => setShowDriveModal(true)}
             onDeleteIncident={handleDeleteIncident}
-          />
-        )}
-
-
-        {currentTab === 'checklists' && (
-          <SafetyChecklistsView
-            checklists={checklists}
-            onPromoteFindingToIncident={handlePromoteFindingToIncident}
-          />
-        )}
-
-        {currentTab === 'emergency' && (
-          <EmergencyCenterView
-            emergency={emergency}
-            onUpdateEmergency={setEmergency}
           />
         )}
       </main>

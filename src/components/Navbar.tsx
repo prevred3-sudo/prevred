@@ -2,13 +2,12 @@ import React from 'react';
 import { Volume2, VolumeX, ShieldAlert, Plus } from 'lucide-react';
 
 interface NavbarProps {
-  currentTab: 'dashboard' | 'incidents' | 'checklists' | 'emergency';
-  onSelectTab: (tab: 'dashboard' | 'incidents' | 'checklists' | 'emergency') => void;
+  currentTab: 'dashboard' | 'incidents';
+  onSelectTab: (tab: 'dashboard' | 'incidents') => void;
   onOpenReportModal: () => void;
   soundEnabled: boolean;
   onToggleSound: () => void;
   openIncidentsCount: number;
-  hasActiveEmergency: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -17,8 +16,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenReportModal,
   soundEnabled,
   onToggleSound,
-  openIncidentsCount,
-  hasActiveEmergency
+  openIncidentsCount
 }) => {
   return (
     <header className="sticky top-0 z-40 bg-slate-950/90 backdrop-blur-md border-b border-slate-800">
@@ -72,34 +70,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
 
 
-            <button
-              onClick={() => onSelectTab('checklists')}
-              className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 py-1 ${
-                currentTab === 'checklists'
-                  ? 'text-amber-400 border-b-2 border-amber-400'
-                  : ''
-              }`}
-            >
-              Inspecciones
-            </button>
-
-            <button
-              onClick={() => onSelectTab('emergency')}
-              className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 py-1 flex items-center gap-1.5 ${
-                hasActiveEmergency
-                  ? 'text-rose-400 font-bold animate-pulse'
-                  : currentTab === 'emergency'
-                  ? 'text-amber-400 border-b-2 border-amber-400'
-                  : ''
-              }`}
-            >
-              <span>Protocolo SOS</span>
-              {hasActiveEmergency && (
-                <span className="text-xs font-mono text-rose-300">
-                  (¡ALERTA ACTIVA!)
-                </span>
-              )}
-            </button>
           </nav>
 
           {/* Zone 3: 1 primary action (+ sound affordance) */}
@@ -142,18 +112,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             className={`whitespace-nowrap shrink-0 ${currentTab === 'incidents' ? 'text-amber-400 font-bold' : ''}`}
           >
             Incidentes ({openIncidentsCount})
-          </button>
-          <button
-            onClick={() => onSelectTab('checklists')}
-            className={`whitespace-nowrap shrink-0 ${currentTab === 'checklists' ? 'text-amber-400 font-bold' : ''}`}
-          >
-            Inspecciones
-          </button>
-          <button
-            onClick={() => onSelectTab('emergency')}
-            className={`whitespace-nowrap shrink-0 ${hasActiveEmergency ? 'text-rose-400 font-bold' : currentTab === 'emergency' ? 'text-amber-400 font-bold' : ''}`}
-          >
-            SOS {hasActiveEmergency ? '(!)' : ''}
           </button>
         </div>
       </div>
