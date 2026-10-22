@@ -1,7 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { X, Cloud, CheckCircle, ExternalLink, RefreshCw, AlertCircle, HardDrive, LogOut } from 'lucide-react';
+import {
+  X,
+  Cloud,
+  CheckCircle,
+  ExternalLink,
+  RefreshCw,
+  AlertCircle,
+  HardDrive,
+  LogOut,
+  Download,
+  ShieldCheck,
+  HelpCircle
+} from 'lucide-react';
 import { Incident } from '../types';
-import { googleSignIn, logoutGoogle, getAccessToken, auth } from '../utils/firebaseAuth';
+import { googleSignIn, logoutGoogle, getAccessToken, auth, parseAuthError, AuthErrorDiagnostic } from '../utils/firebaseAuth';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { uploadMasterSummaryToDrive, listPRLFilesFromDrive, DriveUploadedFile } from '../services/googleDriveService';
 
@@ -22,7 +34,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
   const [isSyncing, setIsSyncing] = useState(false);
   const [uploadedFiles, setUploadedFiles] = useState<DriveUploadedFile[]>([]);
   const [syncSuccessMsg, setSyncSuccessMsg] = useState('');
-  const [errorMsg, setErrorMsg] = useState('');
+  const [authError, setAuthError] = useState<AuthErrorDiagnostic | null>(null);
   const [confirmSync, setConfirmSync] = useState(false);
 
   useEffect(() => {
@@ -55,7 +67,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
 
   const handleSignIn = async () => {
     setIsSigningIn(true);
-    setErrorMsg('');
+    setAuthError(null);
     try {
       const result = await googleSignIn();
       if (result) {
@@ -64,7 +76,8 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
         await loadFiles(result.accessToken);
       }
     } catch (err: unknown) {
-      setErrorMsg((err as Error).message || 'Error al conectar con Google Drive');
+      const diag = parseAuthError(err);
+      setAuthError(diag);
     } finally {
       setIsSigningIn(false);
     }
@@ -76,28 +89,57 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
     setToken(null);
     setUploadedFiles([]);
     setSyncSuccessMsg('');
+    setAuthError(null);
   };
 
   const handleExecuteSync = async () => {
     if (!token) return;
     setIsSyncing(true);
-    setErrorMsg('');
+    setAuthError(null);
     setSyncSuccessMsg('');
     try {
       const uploadedMaster = await uploadMasterSummaryToDrive(token, incidents);
-      setSyncSuccessMsg(`¡Registro Maestro subido con éxito: ${uploadedMaster.name}!`);
+      setSyncSuccessMsg(`¡Registro Maestro subido con éxito a Google Drive: ${uploadedMaster.name}!`);
       setConfirmSync(false);
       await loadFiles(token);
     } catch (err: unknown) {
-      setErrorMsg((err as Error).message || 'Fallo durante la sincronización');
+      const diag = parseAuthError(err);
+      setAuthError(diag);
     } finally {
       setIsSyncing(false);
     }
   };
 
+  // Direct download fallback to ensure user can always export for Google Drive
+  const handleDownloadMasterFile = () => {
+    const payload = {
+      sistema: 'PrevRiesgos PRL - Centro de Comando Matriz',
+      supervisadoPorPrevencionista: 'prevred3@gmail.com',
+      fechaExportacion: new Date().toISOString(),
+      totalIncidentes: incidents.length,
+      resumen: {
+        abiertos: incidents.filter((i) => i.status === 'Abierto').length,
+        enInvestigacion: incidents.filter((i) => i.status === 'En Investigación').length,
+        enAccion: incidents.filter((i) => i.status === 'Acción en Curso').length,
+        cerrados: incidents.filter((i) => i.status === 'Cerrado').length
+      },
+      expedientesYPlanesCAPA: incidents
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `PrevRiesgos_Planes_Accion_PRL_${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm overflow-y-auto">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xl w-full p-6 text-slate-100 shadow-2xl space-y-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm overflow-y-auto">
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xl w-full p-6 text-slate-100 shadow-2xl space-y-5 my-6">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-800 pb-3">
           <div className="flex items-center gap-2.5">
@@ -109,7 +151,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                 Alojamiento & Supervisión en Google Drive
               </h3>
               <p className="text-xs text-slate-400">
-                Resguardo oficial de hallazgos y planes de acción para el Prevencionista
+                Cuenta de Prevención: <strong className="text-slate-200">prevred3@gmail.com</strong>
               </p>
             </div>
           </div>
@@ -125,8 +167,8 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
         <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-3">
           {!user ? (
             <div className="text-center py-2 space-y-3">
-              <p className="text-xs text-slate-300">
-                Inicia sesión con la cuenta del prevencionista (ej. <strong>prevred@gmail.com</strong>) para guardar directamente en Google Drive.
+              <p className="text-xs text-slate-300 max-w-md mx-auto leading-relaxed">
+                Conéctate para alojar los expedientes, fotografías y planes de acción (CAPA) directamente en tu Google Drive.
               </p>
 
               {/* Official Google Sign-In Styled Button */}
@@ -142,7 +184,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                   <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
                   <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
                 </svg>
-                <span>{isSigningIn ? 'Conectando con Google...' : 'Acceder con Google (prevred@gmail.com)'}</span>
+                <span>{isSigningIn ? 'Conectando con Google...' : 'Acceder con Google (prevred3@gmail.com)'}</span>
               </button>
             </div>
           ) : (
@@ -180,10 +222,40 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
           )}
         </div>
 
-        {errorMsg && (
-          <div className="p-3 rounded-lg bg-rose-950/60 border border-rose-800/80 text-xs text-rose-300 flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-            <span>{errorMsg}</span>
+        {/* Detailed Diagnostics Box if Error Occurs */}
+        {authError && (
+          <div className="p-4 rounded-xl bg-rose-950/50 border border-rose-800/80 text-xs space-y-2.5">
+            <div className="flex items-start gap-2.5 text-rose-300">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400 mt-0.5" />
+              <div>
+                <div className="font-bold text-rose-200">
+                  Aviso al conectar con Google ({authError.code})
+                </div>
+                <div className="text-rose-300/90 mt-0.5 leading-relaxed">
+                  {authError.userHint}
+                </div>
+              </div>
+            </div>
+
+            {/* Quick Actions to resolve popup/iframe sandbox issues */}
+            <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-rose-900/40">
+              <a
+                href={typeof window !== 'undefined' ? window.location.href : '#'}
+                target="_blank"
+                rel="noreferrer"
+                className="px-3 py-1.5 bg-rose-900 hover:bg-rose-800 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Abrir en Pestaña Independiente</span>
+              </a>
+
+              <button
+                onClick={handleSignIn}
+                className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-rose-200 border border-rose-800 rounded-lg text-xs font-medium"
+              >
+                Reintentar
+              </button>
+            </div>
           </div>
         )}
 
@@ -195,13 +267,13 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
         )}
 
         {/* Sync Action Area */}
-        {user && (
+        {user ? (
           <div className="space-y-4">
             <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-3">
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-xs font-bold text-slate-200">
-                    Sincronización de Base de Datos PRL
+                    Sincronización en la Nube
                   </div>
                   <div className="text-[11px] text-slate-400 mt-0.5">
                     Se exportará el expediente maestro con los {incidents.length} incidentes y sus planes de acción (CAPA).
@@ -290,7 +362,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                           rel="noreferrer"
                           className="text-blue-400 hover:text-blue-300 flex items-center gap-1 text-[11px] shrink-0 font-medium"
                         >
-                          <span>Abrir</span>
+                          <span>Abrir en Drive</span>
                           <ExternalLink className="w-3 h-3" />
                         </a>
                       )}
@@ -300,12 +372,34 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
               )}
             </div>
           </div>
+        ) : (
+          /* Offline / Direct Export Alternative when not signed in */
+          <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-200">
+                Descarga Local de Respaldo para Google Drive
+              </span>
+              <span className="text-[10px] text-amber-400 font-mono">
+                {incidents.length} registros
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              También puedes descargar el expediente completo con la investigación de los 5 Porqués y planes de acción en formato JSON/Drive para importarlo o archivarlo manualmente.
+            </p>
+            <button
+              onClick={handleDownloadMasterFile}
+              className="w-full py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer border border-slate-700"
+            >
+              <Download className="w-3.5 h-3.5 text-amber-400" />
+              <span>Descargar Expediente Maestro (.JSON)</span>
+            </button>
+          </div>
         )}
 
         <div className="pt-2 border-t border-slate-800 flex justify-end">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-xs font-medium text-slate-400 hover:text-slate-200 border border-slate-800 rounded-lg"
+            className="px-4 py-2 text-xs font-medium text-slate-400 hover:text-slate-200 border border-slate-800 rounded-lg cursor-pointer"
           >
             Cerrar Ventana
           </button>
