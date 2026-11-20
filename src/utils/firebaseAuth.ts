@@ -240,6 +240,34 @@ export const signInWithGoogleIdentityServices = async (): Promise<{
 };
 
 /**
+ * Lightweight Firebase Auth Popup (NO Drive scope) for real-time Cloud Firestore sync on worker phones & Matrix.
+ */
+export const signInWithFirebaseCloud = async (): Promise<AppAuthUser> => {
+  if (isSigningIn) {
+    throw new Error('Ya hay un proceso de inicio de sesión en curso.');
+  }
+  isSigningIn = true;
+  try {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({
+      prompt: 'select_account'
+    });
+    const result = await signInWithPopup(auth, provider);
+    const appUser: AppAuthUser = {
+      uid: result.user.uid,
+      email: result.user.email,
+      displayName: result.user.displayName,
+      photoURL: result.user.photoURL
+    };
+    cachedAppUser = appUser;
+    notifyListeners();
+    return appUser;
+  } finally {
+    isSigningIn = false;
+  }
+};
+
+/**
  * Firebase Auth popup (authenticates both Cloud Firestore AND provides Google Drive OAuth token)
  */
 export const signInWithFirebasePopup = async (): Promise<{
@@ -272,7 +300,7 @@ export const signInWithFirebasePopup = async (): Promise<{
 };
 
 /**
- * Primary sign-in function:
+ * Primary sign-in function for Drive-enabled flows:
  * Uses Firebase Auth Popup first (so Cloud Firestore + Google Drive both work seamlessly),
  * and falls back to GIS if needed.
  */

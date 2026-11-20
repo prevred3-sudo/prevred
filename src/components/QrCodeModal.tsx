@@ -27,8 +27,8 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({
     : sharedBaseUrl;
 
   const targetUrl = urlType === 'shared'
-    ? `${sharedBaseUrl}?mode=satellite`
-    : `${currentBaseUrl}?mode=satellite`;
+    ? `${sharedBaseUrl}?mode=satellite&locked=1`
+    : `${currentBaseUrl}?mode=satellite&locked=1`;
 
   useEffect(() => {
     if (!isOpen) return;
@@ -188,7 +188,7 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({
           </div>
 
           <p className="text-[11px] text-slate-400 text-center pt-1 leading-relaxed">
-            La nube <strong>Firestore</strong> sincroniza en tiempo real entre cualquier celular (4G) y la Matriz (PC) incluso entre enlaces distintos: solo presiona <strong>Conectar Nube</strong> con tu cuenta Google en ambos dispositivos (o usa <strong>Enlace Actual</strong> en la misma URL).
+            Este QR instala en el teléfono <strong>únicamente la App Satélite PRL</strong> (sin acceso a la Matriz). Conecta la cuenta Google en ambos dispositivos para recibir los reportes en tiempo real vía <strong>Cloud Firestore</strong>.
           </p>
         </div>
       </div>

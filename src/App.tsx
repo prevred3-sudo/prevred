@@ -22,7 +22,7 @@ import {
 } from './services/api';
 import {
   getAccessToken,
-  googleSignIn,
+  signInWithFirebaseCloud,
   subscribeFirebaseAuthState
 } from './utils/firebaseAuth';
 import { fetchIncidentsFromDrive } from './services/googleDriveService';
@@ -53,18 +53,50 @@ function mergeUniqueIncidents(incoming: Incident[], current: Incident[]): Incide
 }
 
 export default function App() {
+  // Lock strictly to Satellite mode on installed PWA or worker QR links (?locked=1 / /satellite)
+  const [isSatelliteLocked] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const search = new URLSearchParams(window.location.search);
+    const isStandalone =
+      window.matchMedia('(display-mode: standalone)').matches ||
+      (window.navigator as unknown as { standalone?: boolean }).standalone === true;
+    const isSatellitePath = window.location.pathname === '/satellite';
+    const isLockedParam = search.get('locked') === '1';
+    return isStandalone || isSatellitePath || isLockedParam;
+  });
+
   // Application Mode: 'matrix' (Central Command & Prevention) or 'satellite' (Field Worker Mobile App)
   const [appMode, setAppMode] = useState<'matrix' | 'satellite'>(() => {
     if (typeof window !== 'undefined') {
       const search = new URLSearchParams(window.location.search);
-      if (search.get('mode') === 'satellite') {
+      const isStandalone =
+        window.matchMedia('(display-mode: standalone)').matches ||
+        (window.navigator as unknown as { standalone?: boolean }).standalone === true;
+      if (
+        isStandalone ||
+        window.location.pathname === '/satellite' ||
+        search.get('locked') === '1' ||
+        search.get('mode') === 'satellite'
+      ) {
         return 'satellite';
       }
     }
     return 'matrix';
   });
 
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.title =
+        appMode === 'satellite'
+          ? 'Satélite PRL · Reportes en Terreno'
+          : 'PrevRiesgos · Matriz PRL & Control en Tiempo Real';
+    }
+  }, [appMode]);
+
   const handleSetMode = (mode: 'matrix' | 'satellite') => {
+    if (isSatelliteLocked && mode === 'matrix') {
+      return;
+    }
     setAppMode(mode);
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href);
@@ -72,6 +104,7 @@ export default function App() {
         url.searchParams.set('mode', 'satellite');
       } else {
         url.searchParams.delete('mode');
+        url.searchParams.delete('locked');
       }
       window.history.replaceState({}, '', url.toString());
     }
@@ -148,6 +181,16 @@ export default function App() {
   useEffect(() => {
     if (!firebaseUser || !firebaseUser.emailVerified) return;
 
+    // Auto-flush any reports created on this phone prior to cloud login
+    const localFieldReports = incidents.filter(
+      (i) => i.id.startsWith('field-') || i.id.startsWith('sos-')
+    );
+    if (localFieldReports.length > 0) {
+      Promise.allSettled(
+        localFieldReports.map((inc) => saveIncidentToFirestore(inc))
+      ).catch(() => {});
+    }
+
     const unsubIncidents = subscribeIncidentsFromFirestore(
       (cloudIncidents) => {
         if (cloudIncidents.length > 0) {
@@ -187,10 +230,12 @@ export default function App() {
   const handleConnectCloudSync = async () => {
     setIsConnectingCloud(true);
     try {
-      await googleSignIn();
+      await signInWithFirebaseCloud();
     } catch (err) {
       console.warn('No se pudo conectar la nube:', err);
-      setShowDriveModal(true);
+      if (!isSatelliteLocked) {
+        setShowDriveModal(true);
+      }
     } finally {
       setIsConnectingCloud(false);
     }
@@ -589,27 +634,30 @@ export default function App() {
     });
   };
 
-  // If in SATELLITE mode, render the lightweight field app
-  if (appMode === 'satellite') {
+  // If in SATELLITE mode (or locked worker phone PWA), render ONLY the field app
+  if (appMode === 'satellite' || isSatelliteLocked) {
     return (
       <>
         <SatelliteFieldApp
           onBackToMatrix={() => handleSetMode('matrix')}
+          isLockedSatellite={isSatelliteLocked}
           onSubmitIncident={handleAddIncident}
           myRecentIncidents={mySatelliteIncidents.length > 0 ? mySatelliteIncidents : incidents}
           onTriggerEmergency={handleTriggerFieldEmergency}
           onDeleteIncident={handleDeleteIncident}
-          onOpenDriveModal={() => setShowDriveModal(true)}
+          onOpenDriveModal={isSatelliteLocked ? undefined : () => setShowDriveModal(true)}
           cloudUser={firebaseUser}
           onConnectCloud={handleConnectCloudSync}
           isConnectingCloud={isConnectingCloud}
         />
-        <GoogleDriveSyncModal
-          isOpen={showDriveModal}
-          onClose={() => setShowDriveModal(false)}
-          incidents={incidents}
-          onImportFromDrive={handleImportFromDrive}
-        />
+        {!isSatelliteLocked && (
+          <GoogleDriveSyncModal
+            isOpen={showDriveModal}
+            onClose={() => setShowDriveModal(false)}
+            incidents={incidents}
+            onImportFromDrive={handleImportFromDrive}
+          />
+        )}
       </>
     );
   }

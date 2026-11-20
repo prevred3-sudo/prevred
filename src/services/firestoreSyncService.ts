@@ -209,15 +209,19 @@ export async function saveEmergencyToFirestore(emergency: Partial<EmergencyState
   const path = `${EMERGENCIES_COLLECTION}/${CURRENT_EMERGENCY_DOC_ID}`;
   const docRef = doc(db, EMERGENCIES_COLLECTION, CURRENT_EMERGENCY_DOC_ID);
   try {
-    await setDoc(docRef, {
-      active: Boolean(emergency.active),
-      type: String(emergency.type || 'Evacuación General').slice(0, 80),
-      location: String(emergency.location || 'Planta Principal').slice(0, 300),
-      triggeredAt: String(emergency.triggeredAt || new Date().toISOString()).slice(0, 64),
-      message: String(emergency.message || '').slice(0, 1000),
-      triggeredByUid: user.uid,
-      updatedAt: serverTimestamp()
-    });
+    await setDoc(
+      docRef,
+      {
+        active: Boolean(emergency.active),
+        type: String(emergency.type || 'Evacuación General').slice(0, 80),
+        location: String(emergency.location || 'Planta Principal').slice(0, 300),
+        triggeredAt: String(emergency.triggeredAt || new Date().toISOString()).slice(0, 64),
+        message: String(emergency.message || '').slice(0, 1000),
+        triggeredByUid: user.uid,
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    );
     return true;
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, path);

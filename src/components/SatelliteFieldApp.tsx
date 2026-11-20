@@ -18,7 +18,9 @@ import {
   Clock,
   Database,
   Trash2,
-  Cloud
+  Cloud,
+  Power,
+  X
 } from 'lucide-react';
 import { Incident, IncidentType, SeverityLevel } from '../types';
 import { safetyAudio } from '../utils/audioAlert';
@@ -31,6 +33,7 @@ import type { User } from 'firebase/auth';
 
 interface SatelliteFieldAppProps {
   onBackToMatrix: () => void;
+  isLockedSatellite?: boolean;
   onSubmitIncident: (incident: Incident, options?: { skipApi?: boolean }) => Promise<any> | void;
   myRecentIncidents: Incident[];
   onTriggerEmergency: (location: string, message: string) => void;
@@ -52,6 +55,7 @@ const FIELD_ZONES = [
 
 export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   onBackToMatrix,
+  isLockedSatellite = false,
   onSubmitIncident,
   myRecentIncidents,
   onTriggerEmergency,
@@ -61,7 +65,7 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   onConnectCloud,
   isConnectingCloud
 }) => {
-  const { isInstallable, install, isIOS } = usePWAInstall();
+  const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
 
   // Integrated Offline Sync Queue with IndexedDB & Exponential Backoff
   // Note: processOfflineQueue ALREADY saved the item to /api/incidents, so pass skipApi: true
@@ -97,6 +101,9 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   const [showEppPass, setShowEppPass] = useState(false);
   const [showEmergencyConfirm, setShowEmergencyConfirm] = useState(false);
   const [showIOSModal, setShowIOSModal] = useState(false);
+  const [showAndroidGuide, setShowAndroidGuide] = useState(false);
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  const [isAppClosed, setIsAppClosed] = useState(false);
   const [activeTabHistory, setActiveTabHistory] = useState<'sent' | 'offline_queue'>('sent');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [driveConnectedEmail, setDriveConnectedEmail] = useState<string | null>(() => getCurrentAppUser()?.email || null);
@@ -291,31 +298,89 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
     setTimeout(() => setSosSentToast(false), 6000);
   };
 
+  const handleCloseSatelliteApp = () => {
+    setShowCloseConfirm(false);
+    setIsAppClosed(true);
+    try {
+      window.close();
+    } catch {
+      // Browser prevented programmatic window close; fallback closed screen renders
+    }
+  };
+
+  if (isAppClosed) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6 font-sans">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-sm w-full p-6 text-center space-y-4 shadow-2xl">
+          <div className="w-14 h-14 mx-auto rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-amber-400">
+            <Power className="w-7 h-7" />
+          </div>
+          <div className="space-y-1.5">
+            <h2 className="text-base font-bold text-slate-100">
+              Satélite PRL Cerrada
+            </h2>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              La aplicación de reportes en terreno se cerró de forma segura. Ya puedes salir o cerrar esta pestaña.
+            </p>
+          </div>
+          <div className="space-y-2 pt-2">
+            <button
+              type="button"
+              onClick={() => setIsAppClosed(false)}
+              className="w-full py-2.5 px-4 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs rounded-xl transition-colors cursor-pointer"
+            >
+              Reabrir Satélite PRL
+            </button>
+            {!isLockedSatellite && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAppClosed(false);
+                  onBackToMatrix();
+                }}
+                className="w-full py-2 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-xl transition-colors cursor-pointer border border-slate-700"
+              >
+                Volver a Matriz PRL
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans pb-12">
       {/* Top Mobile Field Bar */}
       <div className="sticky top-0 z-40 bg-slate-900 border-b border-slate-800 px-4 py-3 shadow-md">
         <div className="max-w-md mx-auto flex items-center justify-between">
-          <button
-            onClick={onBackToMatrix}
-            className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-amber-400 transition-colors py-1 cursor-pointer font-medium"
-            title="Volver al Centro de Comando Matriz"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span className="hidden xs:inline">Ir a Matriz PRL</span>
-            <span className="xs:hidden">Matriz</span>
-          </button>
+          {!isLockedSatellite ? (
+            <button
+              onClick={onBackToMatrix}
+              className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-amber-400 transition-colors py-1 cursor-pointer font-medium"
+              title="Volver al Centro de Comando Matriz"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span className="hidden xs:inline">Ir a Matriz PRL</span>
+              <span className="xs:hidden">Matriz</span>
+            </button>
+          ) : (
+            <div className="flex items-center gap-1.5 text-[11px] font-mono text-amber-400 bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded">
+              <HardHat className="w-3.5 h-3.5" />
+              <span>Terreno</span>
+            </div>
+          )}
 
           <div className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
             <h1 className="text-sm font-bold tracking-tight text-slate-100">
-              Satélite Terreno
+              Satélite PRL
             </h1>
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Google Drive Button */}
-            {onOpenDriveModal && (
+            {/* Google Drive Button (hidden on locked worker phones) */}
+            {!isLockedSatellite && onOpenDriveModal && (
               <button
                 onClick={onOpenDriveModal}
                 className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono bg-blue-950/80 text-blue-300 border border-blue-800/60 hover:bg-blue-900/80 cursor-pointer transition-colors"
@@ -348,26 +413,38 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
               )}
             </div>
 
-            {/* PWA Install Button for mobile */}
-            {isInstallable && (
+            {/* PWA Install Button for mobile (auto-hides once installed in standalone mode) */}
+            {!isInstalled && isInstallable && (
               <button
                 onClick={install}
                 className="px-2.5 py-1 text-[11px] font-bold bg-amber-400 hover:bg-amber-300 text-slate-950 rounded flex items-center gap-1 cursor-pointer"
-                title="Instalar en pantalla de inicio"
+                title="Instalar App Satélite en pantalla de inicio"
               >
                 <Smartphone className="w-3.5 h-3.5" />
                 <span>Instalar</span>
               </button>
             )}
 
-            {isIOS && (
+            {!isInstalled && isIOS && (
               <button
                 onClick={() => setShowIOSModal(true)}
-                className="px-2 py-1 text-[11px] border border-slate-700 hover:border-slate-500 text-slate-300 rounded cursor-pointer"
+                className="px-2 py-1 text-[11px] font-bold bg-amber-400 hover:bg-amber-300 text-slate-950 rounded flex items-center gap-1 cursor-pointer"
               >
-                iOS
+                <Smartphone className="w-3.5 h-3.5" />
+                <span>Instalar</span>
               </button>
             )}
+
+            {/* Close Satellite App Button */}
+            <button
+              type="button"
+              onClick={() => setShowCloseConfirm(true)}
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold bg-rose-950/80 hover:bg-rose-900 text-rose-200 border border-rose-800/70 cursor-pointer transition-colors"
+              title="Cerrar Aplicación Satélite"
+            >
+              <Power className="w-3 h-3 text-rose-400" />
+              <span>Cerrar</span>
+            </button>
           </div>
         </div>
       </div>
@@ -376,17 +453,17 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
       <div className="bg-slate-900/80 border-b border-slate-800 px-4 py-2 text-xs">
         <div className="max-w-md mx-auto flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-slate-300">
-            <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+            <div className={`w-2 h-2 rounded-full ${cloudUser ? 'bg-emerald-400 animate-pulse' : isOnline ? 'bg-amber-400' : 'bg-rose-500'}`} />
             <span className="text-[11px]">
               {cloudUser
-                ? `Nube Firestore Activa (${cloudUser.email})`
+                ? `Tiempo Real con Matriz (${cloudUser.email})`
                 : isOnline
-                ? 'Sincronización local con Matriz'
+                ? 'Solo local · Falta Conectar Nube'
                 : 'Sin red: Cola IndexedDB'}
             </span>
           </div>
           <div className="flex items-center gap-2">
-            {onOpenDriveModal && (
+            {!isLockedSatellite && onOpenDriveModal && (
               <button
                 type="button"
                 onClick={onOpenDriveModal}
@@ -411,12 +488,51 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
         </div>
       </div>
 
+      {/* Dedicated Worker App Install Banner (hidden once installed as standalone PWA) */}
+      {!isInstalled && (
+        <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 py-2 text-xs text-amber-100">
+          <div className="max-w-md mx-auto flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Smartphone className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="text-[11px] leading-snug">
+                Instala <strong>Satélite PRL</strong> en tu teléfono para enviar reportes directos a la Matriz.
+              </span>
+            </div>
+            {isInstallable ? (
+              <button
+                type="button"
+                onClick={install}
+                className="px-2.5 py-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded text-[11px] shrink-0 cursor-pointer"
+              >
+                Instalar App
+              </button>
+            ) : isIOS ? (
+              <button
+                type="button"
+                onClick={() => setShowIOSModal(true)}
+                className="px-2.5 py-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded text-[11px] shrink-0 cursor-pointer"
+              >
+                Cómo Instalar
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowAndroidGuide(true)}
+                className="px-2.5 py-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded text-[11px] shrink-0 cursor-pointer"
+              >
+                Instalar
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Cloud Connect Banner when opened on mobile without Google sign-in */}
       {!cloudUser && onConnectCloud && (
         <div className="bg-blue-950/80 border-b border-blue-700/50 px-4 py-2 text-xs text-blue-100">
           <div className="max-w-md mx-auto flex items-center justify-between gap-2">
             <span className="text-[11px] leading-snug">
-              Conecta tu cuenta Google para enviar reportes directo a la Matriz en otro equipo/red.
+              Conecta tu cuenta Google para enviar reportes en tiempo real a la Matriz PRL.
             </span>
             <button
               type="button"
@@ -614,10 +730,13 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
             <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
             <div>
               <div className="text-xs font-bold text-emerald-100">
-                ¡Hallazgo Transmitido a la Matriz!
+                {cloudUser
+                  ? '¡Hallazgo Transmitido a la Matriz en Tiempo Real!'
+                  : 'Reporte Guardado en el Dispositivo'}
               </div>
               <div className="text-xs text-emerald-300 mt-0.5">
-                Registrado bajo código <span className="font-mono font-bold">{lastSubmittedCode}</span> en tiempo real.
+                Registrado bajo código <span className="font-mono font-bold">{lastSubmittedCode}</span>.
+                {!cloudUser && ' Pulsa "Conectar Nube" arriba para sincronizarlo en vivo con la Matriz.'}
               </div>
               {driveBackupNotice && (
                 <div className="text-[11px] text-blue-300 mt-1 flex items-center gap-1">
@@ -980,6 +1099,18 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
             )}
           </div>
         )}
+
+        {/* Explicit Footer Close Satellite Button for Thumb Access */}
+        <div className="pt-2 pb-4">
+          <button
+            type="button"
+            onClick={() => setShowCloseConfirm(true)}
+            className="w-full py-2.5 px-4 bg-slate-900 hover:bg-rose-950/60 text-slate-300 hover:text-rose-200 border border-slate-800 hover:border-rose-800/70 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+          >
+            <Power className="w-4 h-4 text-rose-400" />
+            <span>Cerrar Aplicación Satélite</span>
+          </button>
+        </div>
       </main>
 
       {/* Emergency Confirmation Modal */}
@@ -1026,11 +1157,12 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xs w-full p-5 space-y-3">
             <h3 className="text-sm font-bold text-slate-100 flex items-center gap-1.5">
               <Sparkles className="w-4 h-4 text-amber-400" />
-              <span>Instalar en iPhone / iPad</span>
+              <span>Instalar Satélite PRL en iPhone</span>
             </h3>
             <p className="text-xs text-slate-300 leading-relaxed">
               1. Pulsa el botón <strong>Compartir</strong> en la barra inferior de Safari.<br />
-              2. Desliza hacia abajo y pulsa <strong>"Agregar a Inicio"</strong>.
+              2. Desliza hacia abajo y pulsa <strong>"Agregar a pantalla de inicio"</strong>.<br />
+              3. Solo se instalará la App Satélite de reportes en terreno.
             </p>
             <button
               onClick={() => setShowIOSModal(false)}
@@ -1038,6 +1170,71 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
             >
               Entendido
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Android / Browser Manual Install Guide */}
+      {showAndroidGuide && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xs w-full p-5 space-y-3">
+            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-1.5">
+              <Smartphone className="w-4 h-4 text-amber-400" />
+              <span>Instalar Satélite PRL en Android</span>
+            </h3>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              1. Abre el menú del navegador (los <strong>3 puntos ⋮</strong> arriba a la derecha en Chrome).<br />
+              2. Toca <strong>"Instalar aplicación"</strong> o <strong>"Agregar a la pantalla principal"</strong>.<br />
+              3. Quedará instalada únicamente la App Satélite de terreno.
+            </p>
+            <button
+              onClick={() => setShowAndroidGuide(false)}
+              className="w-full py-2 bg-slate-800 text-slate-200 text-xs font-medium rounded-lg cursor-pointer"
+            >
+              Entendido
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Close App Confirmation Modal */}
+      {showCloseConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xs w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <Power className="w-4 h-4 text-rose-400" />
+                <span>¿Cerrar Satélite PRL?</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowCloseConfirm(false)}
+                className="p-1 text-slate-400 hover:text-slate-200 rounded cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              {pendingCount > 0
+                ? `Tienes ${pendingCount} reporte(s) pendientes en cola offline. Permanecerán guardados en el teléfono hasta que vuelvas a abrir la app.`
+                : 'Se cerrará la ventana de la aplicación móvil de reportes en terreno.'}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowCloseConfirm(false)}
+                className="flex-1 py-2 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleCloseSatelliteApp}
+                className="flex-1 py-2 text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white rounded-lg cursor-pointer"
+              >
+                Sí, Cerrar
+              </button>
+            </div>
           </div>
         </div>
       )}
