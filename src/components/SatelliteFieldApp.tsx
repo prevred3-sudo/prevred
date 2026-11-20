@@ -20,7 +20,8 @@ import {
   Trash2,
   Cloud,
   Power,
-  X
+  X,
+  Lock
 } from 'lucide-react';
 import { Incident, IncidentType, SeverityLevel } from '../types';
 import { safetyAudio } from '../utils/audioAlert';
@@ -34,6 +35,7 @@ import type { User } from 'firebase/auth';
 interface SatelliteFieldAppProps {
   onBackToMatrix: () => void;
   isLockedSatellite?: boolean;
+  onUnlockMatrixAsAdmin?: () => Promise<{ ok: boolean; error?: string }>;
   onSubmitIncident: (incident: Incident, options?: { skipApi?: boolean }) => Promise<any> | void;
   myRecentIncidents: Incident[];
   onTriggerEmergency: (location: string, message: string) => void;
@@ -56,6 +58,7 @@ const FIELD_ZONES = [
 export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   onBackToMatrix,
   isLockedSatellite = false,
+  onUnlockMatrixAsAdmin,
   onSubmitIncident,
   myRecentIncidents,
   onTriggerEmergency,
@@ -104,6 +107,9 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   const [showAndroidGuide, setShowAndroidGuide] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [isAppClosed, setIsAppClosed] = useState(false);
+  const [showAdminUnlockModal, setShowAdminUnlockModal] = useState(false);
+  const [adminUnlockLoading, setAdminUnlockLoading] = useState(false);
+  const [adminUnlockError, setAdminUnlockError] = useState('');
   const [activeTabHistory, setActiveTabHistory] = useState<'sent' | 'offline_queue'>('sent');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [driveConnectedEmail, setDriveConnectedEmail] = useState<string | null>(() => getCurrentAppUser()?.email || null);
@@ -331,7 +337,7 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
             >
               Reabrir Satélite PRL
             </button>
-            {!isLockedSatellite && (
+            {!isLockedSatellite ? (
               <button
                 type="button"
                 onClick={() => {
@@ -342,7 +348,20 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
               >
                 Volver a Matriz PRL
               </button>
-            )}
+            ) : onUnlockMatrixAsAdmin ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAppClosed(false);
+                  setAdminUnlockError('');
+                  setShowAdminUnlockModal(true);
+                }}
+                className="w-full py-2 px-4 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium rounded-xl transition-colors cursor-pointer border border-slate-700 flex items-center justify-center gap-1.5"
+              >
+                <Lock className="w-3.5 h-3.5 text-amber-400" />
+                <span>Acceso Matriz (Solo Admin)</span>
+              </button>
+            ) : null}
           </div>
         </div>
       </div>
@@ -1101,7 +1120,7 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
         )}
 
         {/* Explicit Footer Close Satellite Button for Thumb Access */}
-        <div className="pt-2 pb-4">
+        <div className="pt-2 pb-4 space-y-2">
           <button
             type="button"
             onClick={() => setShowCloseConfirm(true)}
@@ -1110,6 +1129,20 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
             <Power className="w-4 h-4 text-rose-400" />
             <span>Cerrar Aplicación Satélite</span>
           </button>
+
+          {isLockedSatellite && onUnlockMatrixAsAdmin && (
+            <button
+              type="button"
+              onClick={() => {
+                setAdminUnlockError('');
+                setShowAdminUnlockModal(true);
+              }}
+              className="w-full py-1.5 text-[11px] text-slate-500 hover:text-amber-400 flex items-center justify-center gap-1 transition-colors cursor-pointer"
+            >
+              <Lock className="w-3 h-3" />
+              <span>Acceso Administrador a Matriz PRL</span>
+            </button>
+          )}
         </div>
       </main>
 
@@ -1233,6 +1266,72 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
                 className="flex-1 py-2 text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white rounded-lg cursor-pointer"
               >
                 Sí, Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin-Only Matrix Access Modal (prevents workers from entering Matrix) */}
+      {showAdminUnlockModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-xs w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <Lock className="w-4 h-4 text-amber-400" />
+                <span>Acceso Matriz PRL (Admin)</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowAdminUnlockModal(false)}
+                className="p-1 text-slate-400 hover:text-slate-200 rounded cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              La App Satélite está bloqueada para uso en terreno. Inicia sesión con la cuenta administradora{' '}
+              <strong className="text-amber-400">prevred3@gmail.com</strong> para abrir la Aplicación Matriz.
+            </p>
+            {adminUnlockError && (
+              <div className="p-2.5 rounded-lg bg-rose-950/80 border border-rose-700/70 text-[11px] text-rose-200 space-y-2">
+                <div>{adminUnlockError}</div>
+                <a
+                  href={typeof window !== 'undefined' ? window.location.origin : '/'}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-block text-amber-300 underline font-semibold"
+                >
+                  Abrir Matriz en pestaña nueva
+                </a>
+              </div>
+            )}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowAdminUnlockModal(false)}
+                className="flex-1 py-2 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={adminUnlockLoading}
+                onClick={async () => {
+                  if (!onUnlockMatrixAsAdmin) return;
+                  setAdminUnlockLoading(true);
+                  setAdminUnlockError('');
+                  const res = await onUnlockMatrixAsAdmin();
+                  setAdminUnlockLoading(false);
+                  if (res.ok) {
+                    setShowAdminUnlockModal(false);
+                  } else if (res.error) {
+                    setAdminUnlockError(res.error);
+                  }
+                }}
+                className="flex-1 py-2 text-xs font-bold bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-lg cursor-pointer disabled:opacity-50"
+              >
+                {adminUnlockLoading ? 'Verificando...' : 'Entrar con Google'}
               </button>
             </div>
           </div>

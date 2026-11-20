@@ -54,7 +54,7 @@ function mergeUniqueIncidents(incoming: Incident[], current: Incident[]): Incide
 
 export default function App() {
   // Lock strictly to Satellite mode on installed PWA or worker QR links (?locked=1 / /satellite)
-  const [isSatelliteLocked] = useState<boolean>(() => {
+  const [isSatelliteLocked, setIsSatelliteLocked] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     const search = new URLSearchParams(window.location.search);
     const isStandalone =
@@ -94,8 +94,8 @@ export default function App() {
   }, [appMode]);
 
   const handleSetMode = (mode: 'matrix' | 'satellite') => {
-    if (isSatelliteLocked && mode === 'matrix') {
-      return;
+    if (mode === 'matrix') {
+      setIsSatelliteLocked(false);
     }
     setAppMode(mode);
     if (typeof window !== 'undefined') {
@@ -103,6 +103,9 @@ export default function App() {
       if (mode === 'satellite') {
         url.searchParams.set('mode', 'satellite');
       } else {
+        if (url.pathname === '/satellite') {
+          url.pathname = '/';
+        }
         url.searchParams.delete('mode');
         url.searchParams.delete('locked');
       }
@@ -634,23 +637,50 @@ export default function App() {
     });
   };
 
+  const isAdminSignedIn = firebaseUser?.email?.toLowerCase() === 'prevred3@gmail.com';
+  const effectiveSatelliteLocked = isSatelliteLocked && !isAdminSignedIn;
+
+  const handleAdminUnlockMatrix = async (): Promise<{ ok: boolean; error?: string }> => {
+    if (firebaseUser?.email?.toLowerCase() === 'prevred3@gmail.com') {
+      handleSetMode('matrix');
+      return { ok: true };
+    }
+    try {
+      const appUser = await signInWithFirebaseCloud();
+      if (appUser.email?.toLowerCase() === 'prevred3@gmail.com') {
+        handleSetMode('matrix');
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        error: `Cuenta conectada (${appUser.email || 'usuario'}) no es administrador. Solo prevred3@gmail.com puede abrir la Matriz PRL.`
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'No se pudo verificar la cuenta de administrador.'
+      };
+    }
+  };
+
   // If in SATELLITE mode (or locked worker phone PWA), render ONLY the field app
-  if (appMode === 'satellite' || isSatelliteLocked) {
+  if (appMode === 'satellite' || effectiveSatelliteLocked) {
     return (
       <>
         <SatelliteFieldApp
           onBackToMatrix={() => handleSetMode('matrix')}
-          isLockedSatellite={isSatelliteLocked}
+          isLockedSatellite={effectiveSatelliteLocked}
+          onUnlockMatrixAsAdmin={handleAdminUnlockMatrix}
           onSubmitIncident={handleAddIncident}
           myRecentIncidents={mySatelliteIncidents.length > 0 ? mySatelliteIncidents : incidents}
           onTriggerEmergency={handleTriggerFieldEmergency}
           onDeleteIncident={handleDeleteIncident}
-          onOpenDriveModal={isSatelliteLocked ? undefined : () => setShowDriveModal(true)}
+          onOpenDriveModal={effectiveSatelliteLocked ? undefined : () => setShowDriveModal(true)}
           cloudUser={firebaseUser}
           onConnectCloud={handleConnectCloudSync}
           isConnectingCloud={isConnectingCloud}
         />
-        {!isSatelliteLocked && (
+        {!effectiveSatelliteLocked && (
           <GoogleDriveSyncModal
             isOpen={showDriveModal}
             onClose={() => setShowDriveModal(false)}
