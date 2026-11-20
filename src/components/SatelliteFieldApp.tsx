@@ -44,6 +44,8 @@ interface SatelliteFieldAppProps {
   cloudUser?: User | null;
   onConnectCloud?: () => void;
   isConnectingCloud?: boolean;
+  cloudError?: string;
+  onClearCloudError?: () => void;
 }
 
 const FIELD_ZONES = [
@@ -66,7 +68,9 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   onOpenDriveModal,
   cloudUser,
   onConnectCloud,
-  isConnectingCloud
+  isConnectingCloud,
+  cloudError,
+  onClearCloudError
 }) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
 
@@ -507,8 +511,8 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
         </div>
       </div>
 
-      {/* Dedicated Worker App Install Banner (hidden once installed as standalone PWA) */}
-      {!isInstalled && (
+      {/* Dedicated Worker App Install Banner (ONLY shown when opened via QR /satellite?locked=1 and not yet installed) */}
+      {isLockedSatellite && !isInstalled && (
         <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 py-2 text-xs text-amber-100">
           <div className="max-w-md mx-auto flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -549,18 +553,34 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
       {/* Cloud Connect Banner when opened on mobile without Google sign-in */}
       {!cloudUser && onConnectCloud && (
         <div className="bg-blue-950/80 border-b border-blue-700/50 px-4 py-2 text-xs text-blue-100">
-          <div className="max-w-md mx-auto flex items-center justify-between gap-2">
-            <span className="text-[11px] leading-snug">
-              Conecta tu cuenta Google para enviar reportes en tiempo real a la Matriz PRL.
-            </span>
-            <button
-              type="button"
-              onClick={onConnectCloud}
-              disabled={isConnectingCloud}
-              className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded text-[11px] shrink-0 cursor-pointer disabled:opacity-50"
-            >
-              {isConnectingCloud ? 'Conectando...' : 'Conectar Nube'}
-            </button>
+          <div className="max-w-md mx-auto space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] leading-snug">
+                Conecta tu cuenta Google para enviar reportes en tiempo real a la Matriz PRL.
+              </span>
+              <button
+                type="button"
+                onClick={onConnectCloud}
+                disabled={isConnectingCloud}
+                className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded text-[11px] shrink-0 cursor-pointer disabled:opacity-50"
+              >
+                {isConnectingCloud ? 'Conectando...' : 'Conectar Nube'}
+              </button>
+            </div>
+            {cloudError && (
+              <div className="bg-rose-950/80 border border-rose-700/70 text-rose-200 px-2.5 py-1.5 rounded flex items-center justify-between gap-2 text-[11px]">
+                <span>{cloudError}</span>
+                {onClearCloudError && (
+                  <button
+                    type="button"
+                    onClick={onClearCloudError}
+                    className="text-rose-300 hover:text-white cursor-pointer shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

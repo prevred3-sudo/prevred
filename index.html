@@ -15,6 +15,22 @@
     <meta property="og:title" content="PrevRiesgos · Gestión PRL & Registro en Tiempo Real" />
     <meta property="og:description" content="Sistema integral de prevención de riesgos laborales (PRL/HSE), registro de incidentes en tiempo real y aplicación satélite móvil para terreno." />
     <meta property="og:type" content="website" />
+    <script>
+      (function () {
+        try {
+          var p = window.location.pathname || '/';
+          var s = new URLSearchParams(window.location.search || '');
+          var isSatelliteQr = p === '/satellite' || p.indexOf('/satellite/') === 0 || s.get('locked') === '1';
+          if (isSatelliteQr) {
+            var link = document.createElement('link');
+            link.rel = 'manifest';
+            link.href = '/satellite.webmanifest';
+            document.head.appendChild(link);
+            document.title = 'Satélite PRL · Reportes en Terreno';
+          }
+        } catch (e) {}
+      })();
+    </script>
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

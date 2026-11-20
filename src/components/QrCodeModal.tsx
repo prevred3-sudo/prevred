@@ -15,20 +15,24 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({
 }) => {
   const [copied, setCopied] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
-  const [urlType, setUrlType] = useState<'shared' | 'current'>('shared');
-  const [isGenerating, setIsGenerating] = useState(false);
-
   // The permanent shared URL accessible from external mobile networks / 4G
   const sharedBaseUrl = 'https://ais-pre-bdahy7ontjrrapyfilywqt-652582632173.us-east1.run.app';
+  const isDevHost =
+    typeof window !== 'undefined' && window.location.hostname.includes('ais-dev-');
 
-  // Compute final satellite link based on user selection
-  const currentBaseUrl = typeof window !== 'undefined'
-    ? `${window.location.origin}${window.location.pathname}`
+  const [urlType, setUrlType] = useState<'shared' | 'current'>(() =>
+    isDevHost ? 'shared' : 'current'
+  );
+  const [isGenerating, setIsGenerating] = useState(false);
+
+  // Compute final satellite link based on user selection (/satellite?locked=1 scopes PWA install to QR only)
+  const currentOrigin = typeof window !== 'undefined'
+    ? window.location.origin
     : sharedBaseUrl;
 
   const targetUrl = urlType === 'shared'
-    ? `${sharedBaseUrl}?mode=satellite&locked=1`
-    : `${currentBaseUrl}?mode=satellite&locked=1`;
+    ? `${sharedBaseUrl}/satellite?locked=1`
+    : `${currentOrigin}/satellite?locked=1`;
 
   useEffect(() => {
     if (!isOpen) return;
@@ -121,7 +125,9 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            <span>Enlace Actual</span>
+            <span>
+              {isDevHost ? 'Enlace Actual (Dev)' : 'Este Dominio (Recomendado)'}
+            </span>
           </button>
         </div>
 

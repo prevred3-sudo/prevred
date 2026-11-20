@@ -1,0 +1,31 @@
+{
+  "id": "/satellite",
+  "name": "PrevRiesgos Satélite Terreno",
+  "short_name": "Satélite PRL",
+  "description": "Aplicación móvil de terreno para trabajadores: envío de reportes, fotos y alertas SOS en tiempo real a la Matriz PRL.",
+  "theme_color": "#020617",
+  "background_color": "#020617",
+  "display": "standalone",
+  "start_url": "/satellite?locked=1",
+  "scope": "/satellite",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -21,6 +21,7 @@ import {
   updateEmergencyApi
 } from './services/api';
 import {
+  formatFirebaseAuthError,
   getAccessToken,
   signInWithFirebaseCloud,
   subscribeFirebaseAuthState
@@ -75,28 +76,24 @@ function mergeUniqueIncidents(incoming: Incident[], current: Incident[]): Incide
 }
 
 export default function App() {
-  // Lock strictly to Satellite mode on installed PWA or worker QR links (?locked=1 / /satellite)
+  // Lock strictly to Satellite mode ONLY on worker QR links (/satellite or ?locked=1)
   const [isSatelliteLocked, setIsSatelliteLocked] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     const search = new URLSearchParams(window.location.search);
-    const isStandalone =
-      window.matchMedia('(display-mode: standalone)').matches ||
-      (window.navigator as unknown as { standalone?: boolean }).standalone === true;
-    const isSatellitePath = window.location.pathname === '/satellite';
+    const isSatellitePath =
+      window.location.pathname === '/satellite' ||
+      window.location.pathname.startsWith('/satellite/');
     const isLockedParam = search.get('locked') === '1';
-    return isStandalone || isSatellitePath || isLockedParam;
+    return isSatellitePath || isLockedParam;
   });
 
   // Application Mode: 'matrix' (Central Command & Prevention) or 'satellite' (Field Worker Mobile App)
   const [appMode, setAppMode] = useState<'matrix' | 'satellite'>(() => {
     if (typeof window !== 'undefined') {
       const search = new URLSearchParams(window.location.search);
-      const isStandalone =
-        window.matchMedia('(display-mode: standalone)').matches ||
-        (window.navigator as unknown as { standalone?: boolean }).standalone === true;
       if (
-        isStandalone ||
         window.location.pathname === '/satellite' ||
+        window.location.pathname.startsWith('/satellite/') ||
         search.get('locked') === '1' ||
         search.get('mode') === 'satellite'
       ) {
@@ -144,6 +141,7 @@ export default function App() {
   // Firebase Auth user (enables Cloud Firestore cross-device real-time sync)
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [isConnectingCloud, setIsConnectingCloud] = useState(false);
+  const [cloudSyncError, setCloudSyncError] = useState<string>('');
 
   // Persistent tombstones for deleted incidents so polling/Drive/tabs never resurrect them
   const deletedIdsRef = useRef<Set<string>>(loadStoredSet(DELETED_IDS_KEY));
@@ -303,13 +301,13 @@ export default function App() {
 
   const handleConnectCloudSync = async () => {
     setIsConnectingCloud(true);
+    setCloudSyncError('');
     try {
       await signInWithFirebaseCloud();
     } catch (err) {
-      console.warn('No se pudo conectar la nube:', err);
-      if (!isSatelliteLocked) {
-        setShowDriveModal(true);
-      }
+      const friendly = formatFirebaseAuthError(err);
+      console.warn('No se pudo conectar la nube:', friendly);
+      setCloudSyncError(friendly);
     } finally {
       setIsConnectingCloud(false);
     }
@@ -745,7 +743,7 @@ export default function App() {
       return { ok: true };
     }
     try {
-      const appUser = await signInWithFirebaseCloud();
+      const appUser = await signInWithFirebaseCloud({ loginHint: 'prevred3@gmail.com' });
       if (appUser.email?.toLowerCase() === 'prevred3@gmail.com') {
         handleSetMode('matrix');
         return { ok: true };
@@ -757,7 +755,7 @@ export default function App() {
     } catch (err) {
       return {
         ok: false,
-        error: err instanceof Error ? err.message : 'No se pudo verificar la cuenta de administrador.'
+        error: formatFirebaseAuthError(err)
       };
     }
   };
@@ -778,6 +776,8 @@ export default function App() {
           cloudUser={firebaseUser}
           onConnectCloud={handleConnectCloudSync}
           isConnectingCloud={isConnectingCloud}
+          cloudError={cloudSyncError}
+          onClearCloudError={() => setCloudSyncError('')}
         />
         {!effectiveSatelliteLocked && (
           <GoogleDriveSyncModal
@@ -852,6 +852,21 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {cloudSyncError && !firebaseUser && (
+        <div className="bg-rose-950/80 border-b border-rose-700/70 px-4 py-2 text-rose-200 text-xs">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-2">
+            <span>{cloudSyncError}</span>
+            <button
+              type="button"
+              onClick={() => setCloudSyncError('')}
+              className="text-rose-300 hover:text-white cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Active SOS Alert Banner from Satellite */}
       {activeEmergency?.active && (
