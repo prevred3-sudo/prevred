@@ -114,6 +114,21 @@ export async function saveIncidentToDrive(
 ): Promise<{ reportFile: DriveUploadedFile; photoFile?: DriveUploadedFile }> {
   const targetFolderId = folderId || (await getOrCreatePRLFolder(accessToken));
 
+  // Avoid duplicate uploads of the same incident ID in the folder
+  const existingQuery = encodeURIComponent(
+    `'${targetFolderId}' in parents and name contains '${incident.code}' and mimeType = 'application/json' and trashed = false`
+  );
+  const existingCheck = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${existingQuery}&fields=files(id,name,mimeType,webViewLink)`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (existingCheck.ok) {
+    const existingData = await existingCheck.json();
+    if (existingData.files && existingData.files.length > 0) {
+      return { reportFile: existingData.files[0] };
+    }
+  }
+
   // If incident has photo evidence as base64, upload photo first
   let photoFile: DriveUploadedFile | undefined;
   if (incident.photoUrl && incident.photoUrl.startsWith('data:image/')) {
@@ -126,7 +141,7 @@ export async function saveIncidentToDrive(
   }
 
   const fileName = `Informe_${incident.code}_${incident.title.slice(0, 30).replace(/[^a-zA-Z0-9_-]/g, '_')}.json`;
-  
+
   const content = JSON.stringify(
     {
       sistema: 'PrevRiesgos PRL · Gestión y Registro en Tiempo Real',
@@ -147,6 +162,12 @@ export async function saveIncidentToDrive(
       planDeAccionCorrectivoCAPA: incident.correctiveActions,
       fotoEvidenciaAdjunta: incident.photoUrl ? 'Registrada en sistema' : 'Sin fotografía',
       enlaceFotoEnDrive: photoFile?.webViewLink || 'N/A',
+      photoFileId: photoFile?.id || null,
+      rawIncident: {
+        ...incident,
+        // Keep base64 photo out of JSON if uploaded separately to keep Drive JSON lightweight
+        photoUrl: photoFile?.id ? undefined : incident.photoUrl
+      },
       exportadoEl: new Date().toISOString()
     },
     null,
@@ -187,6 +208,103 @@ export async function saveIncidentToDrive(
 }
 
 /**
+ * Fetches & reconstructs satellite incident reports stored in Google Drive (two-way sync -> Matrix)
+ */
+export async function fetchIncidentsFromDrive(accessToken: string): Promise<Incident[]> {
+  const folderId = await getOrCreatePRLFolder(accessToken);
+  const query = encodeURIComponent(
+    `'${folderId}' in parents and name contains 'Informe_' and mimeType = 'application/json' and trashed = false`
+  );
+
+  const listRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${query}&orderBy=createdTime desc&pageSize=25&fields=files(id,name,createdTime)`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` }
+    }
+  );
+
+  if (!listRes.ok) {
+    throw new Error('No se pudieron consultar los informes en Google Drive');
+  }
+
+  const listData = await listRes.json();
+  const files: DriveUploadedFile[] = listData.files || [];
+  const importedIncidents: Incident[] = [];
+
+  for (const file of files) {
+    try {
+      const contentRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      if (!contentRes.ok) continue;
+      const parsed = await contentRes.json();
+
+      let reconstructed: Incident | null = null;
+      if (parsed.rawIncident && parsed.rawIncident.id && parsed.rawIncident.title) {
+        reconstructed = parsed.rawIncident as Incident;
+      } else if (parsed.codigoIncidente && parsed.titulo) {
+        reconstructed = {
+          id: `drive-${file.id}`,
+          code: parsed.codigoIncidente,
+          timestamp: parsed.fechaHoraRegistro || file.createdTime || new Date().toISOString(),
+          timeFormatted: 'Sincronizado desde Google Drive',
+          title: parsed.titulo,
+          description: parsed.descripcionHechos || 'Reporte sincronizado desde Google Drive (prevred3@gmail.com)',
+          location: parsed.ubicacion || 'Terreno',
+          type: parsed.clasificacion || 'Condición Insegura',
+          severity: parsed.severidad || 'Moderado',
+          status: parsed.estadoActual || 'Abierto',
+          reporterName: parsed.reportadoPor || 'Operador Terreno',
+          reporterRole: parsed.rolReportante || 'Trabajador en Terreno',
+          affectedPerson: parsed.trabajadorAfectado !== 'Sin lesionados' ? parsed.trabajadorAfectado : undefined,
+          immediateAction: parsed.medidaContencionInmediata || '',
+          rootCauseAnalysis: parsed.investigacion5Porques || {
+            why1: '',
+            why2: '',
+            why3: '',
+            why4: '',
+            why5: '',
+            rootCauseSummary: ''
+          },
+          correctiveActions: Array.isArray(parsed.planDeAccionCorrectivoCAPA)
+            ? parsed.planDeAccionCorrectivoCAPA
+            : []
+        };
+      }
+
+      if (reconstructed) {
+        // Fetch linked photo from Drive as dataURL if photoFileId is present and photoUrl is missing
+        if (!reconstructed.photoUrl && parsed.photoFileId) {
+          try {
+            const imgRes = await fetch(
+              `https://www.googleapis.com/drive/v3/files/${parsed.photoFileId}?alt=media`,
+              { headers: { Authorization: `Bearer ${accessToken}` } }
+            );
+            if (imgRes.ok) {
+              const blob = await imgRes.blob();
+              const dataUrl = await new Promise<string>((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(String(reader.result || ''));
+                reader.readAsDataURL(blob);
+              });
+              if (dataUrl) reconstructed.photoUrl = dataUrl;
+            }
+          } catch {
+            // Keep incident even if photo fetch fails
+          }
+        }
+        importedIncidents.push(reconstructed);
+      }
+    } catch {
+      // Skip malformed JSON file
+    }
+  }
+
+  return importedIncidents;
+}
+
+/**
  * Uploads a master summary of all incidents and open CAPA actions
  */
 export async function uploadMasterSummaryToDrive(
@@ -215,8 +333,8 @@ export async function uploadMasterSummaryToDrive(
       estado: i.status,
       reportante: i.reporterName,
       tieneFoto: Boolean(i.photoUrl),
-      accionesPendientes: i.correctiveActions.filter((a) => !a.completed).length,
-      planDeAccion: i.correctiveActions
+      accionesPendientes: (i.correctiveActions || []).filter((a) => !a.completed).length,
+      planDeAccion: i.correctiveActions || []
     }))
   };
 

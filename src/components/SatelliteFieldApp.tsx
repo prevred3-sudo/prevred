@@ -29,7 +29,7 @@ import { saveIncidentToDrive } from '../services/googleDriveService';
 
 interface SatelliteFieldAppProps {
   onBackToMatrix: () => void;
-  onSubmitIncident: (incident: Incident) => Promise<any> | void;
+  onSubmitIncident: (incident: Incident, options?: { skipApi?: boolean }) => Promise<any> | void;
   myRecentIncidents: Incident[];
   onTriggerEmergency: (location: string, message: string) => void;
   onDeleteIncident?: (id: string) => void;
@@ -56,6 +56,7 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   const { isInstallable, install, isIOS } = usePWAInstall();
 
   // Integrated Offline Sync Queue with IndexedDB & Exponential Backoff
+  // Note: processOfflineQueue ALREADY saved the item to /api/incidents, so pass skipApi: true
   const {
     isOnline,
     pendingCount,
@@ -66,7 +67,7 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
     enqueueIncident,
     removeOfflineItem
   } = useOfflineSyncQueue((syncedIncident) => {
-    onSubmitIncident(syncedIncident);
+    onSubmitIncident(syncedIncident, { skipApi: true });
   });
 
   // Field Form State
@@ -78,14 +79,19 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   const [note, setNote] = useState('');
   const [workerName, setWorkerName] = useState('Operador Terreno');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [validationError, setValidationError] = useState('');
   const [showSuccessToast, setShowSuccessToast] = useState(false);
+  const [driveBackupNotice, setDriveBackupNotice] = useState('');
   const [showOfflineToast, setShowOfflineToast] = useState(false);
+  const [sosSentToast, setSosSentToast] = useState(false);
   const [lastSubmittedCode, setLastSubmittedCode] = useState('');
   const [showHistory, setShowHistory] = useState(false);
   const [showEppPass, setShowEppPass] = useState(false);
   const [showEmergencyConfirm, setShowEmergencyConfirm] = useState(false);
   const [showIOSModal, setShowIOSModal] = useState(false);
   const [activeTabHistory, setActiveTabHistory] = useState<'sent' | 'offline_queue'>('sent');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [driveConnectedEmail, setDriveConnectedEmail] = useState<string | null>(() => getCurrentAppUser()?.email || null);
 
   // Daily EPP Pass states
   const [eppChecks, setEppChecks] = useState({
@@ -97,39 +103,55 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setDriveConnectedEmail(getCurrentAppUser()?.email || null);
+    }, 2000);
+    return () => clearInterval(timer);
+  }, []);
+
   const handlePhotoCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setValidationError('');
       const reader = new FileReader();
       reader.onloadend = () => {
         if (typeof reader.result === 'string') {
+          const rawResult = reader.result;
           const img = new Image();
           img.onload = () => {
-            const canvas = document.createElement('canvas');
-            const MAX_DIM = 1280;
-            let width = img.width;
-            let height = img.height;
+            try {
+              const canvas = document.createElement('canvas');
+              const MAX_DIM = 1280;
+              let width = img.width;
+              let height = img.height;
 
-            if (width > height && width > MAX_DIM) {
-              height = Math.round((height * MAX_DIM) / width);
-              width = MAX_DIM;
-            } else if (height > MAX_DIM) {
-              width = Math.round((width * MAX_DIM) / height);
-              height = MAX_DIM;
-            }
+              if (width > height && width > MAX_DIM) {
+                height = Math.round((height * MAX_DIM) / width);
+                width = MAX_DIM;
+              } else if (height > MAX_DIM) {
+                width = Math.round((width * MAX_DIM) / height);
+                height = MAX_DIM;
+              }
 
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-              ctx.drawImage(img, 0, 0, width, height);
-              const compressed = canvas.toDataURL('image/jpeg', 0.82);
-              setCapturedPhoto(compressed);
-            } else {
-              setCapturedPhoto(reader.result as string);
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                ctx.drawImage(img, 0, 0, width, height);
+                const compressed = canvas.toDataURL('image/jpeg', 0.82);
+                setCapturedPhoto(compressed);
+              } else {
+                setCapturedPhoto(rawResult);
+              }
+            } catch {
+              setCapturedPhoto(rawResult);
             }
           };
-          img.src = reader.result;
+          img.onerror = () => {
+            setCapturedPhoto(rawResult);
+          };
+          img.src = rawResult;
         }
       };
       reader.readAsDataURL(file);
@@ -155,8 +177,11 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
 
   const handleSendReport = async (e: React.FormEvent) => {
     e.preventDefault();
+    setValidationError('');
+    setDriveBackupNotice('');
+
     if (!note.trim() && !capturedPhoto) {
-      alert('Por favor tome una foto o escriba una breve descripción del hallazgo.');
+      setValidationError('Por favor tome una foto o escriba una breve descripción del hallazgo antes de enviar.');
       return;
     }
 
@@ -174,7 +199,7 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
       type: selectedType,
       severity: selectedSeverity,
       status: 'Abierto',
-      reporterName: workerName,
+      reporterName: workerName.trim() || 'Operador Terreno',
       reporterRole: 'Trabajador en Terreno',
       immediateAction: 'Reportado de inmediato a Prevención Central vía Satélite.',
       photoUrl: capturedPhoto || undefined,
@@ -211,22 +236,26 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
     } else {
       // ONLINE: Attempt immediate server transmission
       try {
-        safetyAudio.playIncidentAlert(selectedSeverity);
         await onSubmitIncident(newIncident);
         setLastSubmittedCode(code);
         setShowSuccessToast(true);
-        setTimeout(() => setShowSuccessToast(false), 4500);
+        setTimeout(() => setShowSuccessToast(false), 5000);
 
         // Check if user is logged into Google Drive (prevred3@gmail.com) for automatic cloud backup
         const token = await getAccessToken();
         if (token) {
-          saveIncidentToDrive(token, newIncident).catch((driveErr) => {
-            console.warn('[Google Drive] Respaldo automático falló:', driveErr);
-          });
+          saveIncidentToDrive(token, newIncident)
+            .then(() => {
+              setDriveBackupNotice(`Respaldado también en Google Drive (${driveConnectedEmail || 'prevred3@gmail.com'})`);
+            })
+            .catch((driveErr) => {
+              console.warn('[Google Drive] Respaldo automático falló:', driveErr);
+            });
         }
       } catch (err) {
         // Transmission error fallback to IndexedDB
         await enqueueIncident(newIncident, 'Error de red durante transmisión a la Matriz');
+        setLastSubmittedCode(code);
         setShowOfflineToast(true);
         setTimeout(() => setShowOfflineToast(false), 5000);
       }
@@ -238,13 +267,17 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
     setNote('');
     setCapturedPhoto(null);
     setGpsLocation('');
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
   };
 
   const handleTriggerSOS = () => {
     safetyAudio.playEmergencySiren();
     onTriggerEmergency(zone, `¡Alerta de pánico emitida por ${workerName} desde la Satélite Terreno!`);
     setShowEmergencyConfirm(false);
-    alert('¡Alerta SOS transmitida con máxima prioridad a la Matriz PRL!');
+    setSosSentToast(true);
+    setTimeout(() => setSosSentToast(false), 6000);
   };
 
   return (
@@ -516,6 +549,29 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
           </button>
         </div>
 
+        {/* Validation Error Banner (replaces blocked window.alert) */}
+        {validationError && (
+          <div className="bg-rose-950/90 border border-rose-500/50 rounded-xl p-3.5 text-rose-200 flex items-start gap-2.5 text-xs shadow-lg">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <span>{validationError}</span>
+          </div>
+        )}
+
+        {/* SOS Transmitted Toast */}
+        {sosSentToast && (
+          <div className="bg-rose-950 border border-rose-500 rounded-xl p-4 text-rose-100 flex items-start gap-3 shadow-xl">
+            <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="text-xs font-bold text-white">
+                ¡Alerta SOS Transmitida con Máxima Prioridad!
+              </div>
+              <div className="text-xs text-rose-200 mt-0.5">
+                La Matriz PRL recibió su señal de emergencia en tiempo real para el sector <strong>{zone}</strong>.
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Online Success Toast */}
         {showSuccessToast && (
           <div className="bg-emerald-950/90 border border-emerald-500/40 rounded-xl p-4 text-emerald-200 flex items-start gap-3 shadow-xl">
@@ -525,8 +581,14 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
                 ¡Hallazgo Transmitido a la Matriz!
               </div>
               <div className="text-xs text-emerald-300 mt-0.5">
-                Registrado bajo código <span className="font-mono font-bold">{lastSubmittedCode}</span> con fotografía en tiempo real.
+                Registrado bajo código <span className="font-mono font-bold">{lastSubmittedCode}</span> en tiempo real.
               </div>
+              {driveBackupNotice && (
+                <div className="text-[11px] text-blue-300 mt-1 flex items-center gap-1">
+                  <Cloud className="w-3 h-3 text-blue-400 shrink-0" />
+                  <span>{driveBackupNotice}</span>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -789,18 +851,27 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
                           En Matriz
                         </span>
                         {onDeleteIncident && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (confirm(`¿Eliminar reporte ${inc.code}?`)) {
+                          confirmDeleteId === inc.id ? (
+                            <button
+                              type="button"
+                              onClick={() => {
                                 onDeleteIncident(inc.id);
-                              }
-                            }}
-                            className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors cursor-pointer"
-                            title="Eliminar reporte"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                                setConfirmDeleteId(null);
+                              }}
+                              className="px-2 py-0.5 bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold rounded cursor-pointer"
+                            >
+                              Confirmar
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteId(inc.id)}
+                              className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors cursor-pointer"
+                              title="Eliminar reporte"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )
                         )}
                       </div>
                     </div>
@@ -832,11 +903,7 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
                           </span>
                           <button
                             type="button"
-                            onClick={() => {
-                              if (confirm(`¿Descartar este reporte no sincronizado (${item.incident.code})?`)) {
-                                removeOfflineItem(item.id);
-                              }
-                            }}
+                            onClick={() => removeOfflineItem(item.id)}
                             className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition-colors cursor-pointer"
                             title="Descartar reporte pendiente"
                           >

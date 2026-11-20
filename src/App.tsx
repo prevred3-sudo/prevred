@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { AlertTriangle, CheckCircle2, X } from 'lucide-react';
 import { Navbar } from './components/Navbar';
 import { DashboardView } from './components/DashboardView';
 import { IncidentLiveStreamView } from './components/IncidentLiveStreamView';
@@ -7,17 +8,36 @@ import { NewIncidentModal } from './components/NewIncidentModal';
 import { IncidentDossierModal } from './components/IncidentDossierModal';
 import { QrCodeModal } from './components/QrCodeModal';
 import { GoogleDriveSyncModal } from './components/GoogleDriveSyncModal';
-import {
-  INITIAL_INCIDENTS
-} from './data/initialData';
-import { Incident } from './types';
+import { INITIAL_INCIDENTS } from './data/initialData';
+import { EmergencyState, Incident } from './types';
 import { safetyAudio } from './utils/audioAlert';
 import {
-  fetchIncidentsApi,
+  fetchIncidentsFromServer,
   createIncidentApi,
+  syncBatchIncidentsApi,
   updateIncidentApi,
-  deleteIncidentApi
+  deleteIncidentApi,
+  updateEmergencyApi
 } from './services/api';
+import { getAccessToken } from './utils/firebaseAuth';
+import { fetchIncidentsFromDrive } from './services/googleDriveService';
+
+const SYNC_CHANNEL_NAME = 'prevriesgos-prl-sync';
+
+function mergeUniqueIncidents(incoming: Incident[], current: Incident[]): Incident[] {
+  const map = new Map<string, Incident>();
+  for (const item of incoming) {
+    if (item && item.id) map.set(item.id, item);
+  }
+  for (const item of current) {
+    if (item && item.id && !map.has(item.id)) {
+      map.set(item.id, item);
+    }
+  }
+  return Array.from(map.values()).sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  );
+}
 
 export default function App() {
   // Application Mode: 'matrix' (Central Command & Prevention) or 'satellite' (Field Worker Mobile App)
@@ -62,6 +82,10 @@ export default function App() {
 
   const [daysWithoutLTI, setDaysWithoutLTI] = useState<number>(142);
 
+  // Live incoming notification & SOS emergency banner on Matrix
+  const [incomingBanner, setIncomingBanner] = useState<{ code: string; title: string } | null>(null);
+  const [activeEmergency, setActiveEmergency] = useState<EmergencyState | null>(null);
+
   // Modals state
   const [showReportModal, setShowReportModal] = useState(false);
   const [showQrModal, setShowQrModal] = useState(false);
@@ -71,41 +95,205 @@ export default function App() {
   // Field submissions tracked for satellite history
   const [mySatelliteIncidents, setMySatelliteIncidents] = useState<Incident[]>([]);
 
-  // 1. Initial server fetch
+  const broadcastRef = useRef<BroadcastChannel | null>(null);
+  const knownIdsRef = useRef<Set<string>>(new Set(incidents.map((i) => i.id)));
+
   useEffect(() => {
-    async function initServerSync() {
-      const serverList = await fetchIncidentsApi();
-      if (serverList && serverList.length > 0) {
-        setIncidents(serverList);
-      }
+    knownIdsRef.current = new Set(incidents.map((i) => i.id));
+  }, [incidents]);
+
+  const notifyNewIncoming = useCallback((inc: Incident) => {
+    if (!knownIdsRef.current.has(inc.id)) {
+      safetyAudio.playIncidentAlert(inc.severity);
+      setIncomingBanner({ code: inc.code, title: inc.title });
+      setTimeout(() => {
+        setIncomingBanner((prev) => (prev?.code === inc.code ? null : prev));
+      }, 6500);
     }
-    initServerSync();
   }, []);
 
-  // 2. Real-time background poll (every 2.5 seconds) so field reports appear live on Matrix
+  const postToBroadcast = useCallback((type: string, payload: unknown) => {
+    try {
+      broadcastRef.current?.postMessage({ type, payload });
+    } catch {
+      // BroadcastChannel unavailable
+    }
+  }, []);
+
+  // 1. Cross-tab BroadcastChannel listener (instant local multi-tab sync)
   useEffect(() => {
-    const pollInterval = setInterval(async () => {
+    if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return;
+    const channel = new BroadcastChannel(SYNC_CHANNEL_NAME);
+    broadcastRef.current = channel;
+
+    channel.onmessage = (event) => {
+      const { type, payload } = event.data || {};
+      if (type === 'incident:created' && payload?.id) {
+        notifyNewIncoming(payload as Incident);
+        setIncidents((prev) => mergeUniqueIncidents([payload as Incident], prev));
+      } else if (type === 'incident:updated' && payload?.id) {
+        setIncidents((prev) => prev.map((i) => (i.id === payload.id ? payload : i)));
+      } else if (type === 'incident:deleted' && payload?.id) {
+        setIncidents((prev) => prev.filter((i) => i.id !== payload.id));
+      } else if (type === 'emergency:updated') {
+        setActiveEmergency(payload);
+        if (payload?.active) safetyAudio.playEmergencySiren();
+      }
+    };
+
+    return () => {
+      channel.close();
+      broadcastRef.current = null;
+    };
+  }, [notifyNewIncoming]);
+
+  // 2. WebSocket real-time connection to /ws + auto-reconnect
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
+
+    const connectWs = () => {
+      if (disposed) return;
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
+
       try {
-        const latest = await fetchIncidentsApi();
-        if (latest && latest.length > 0) {
-          setIncidents((current) => {
-            // If new incidents arrived from external device (satellite worker)
-            if (latest.length > current.length) {
-              const newest = latest[0];
-              if (newest && !current.some((c) => c.id === newest.id)) {
-                safetyAudio.playIncidentAlert(newest.severity);
+        ws = new WebSocket(wsUrl);
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'init' && msg.payload) {
+              const serverIncidents: Incident[] = Array.isArray(msg.payload.incidents)
+                ? msg.payload.incidents
+                : [];
+              if (serverIncidents.length > 0) {
+                setIncidents(serverIncidents);
+              }
+              if (msg.payload.emergency?.active) {
+                setActiveEmergency(msg.payload.emergency);
+              }
+            } else if (msg.type === 'incident:created' && msg.payload?.id) {
+              const created = msg.payload as Incident;
+              notifyNewIncoming(created);
+              setIncidents((prev) => mergeUniqueIncidents([created], prev));
+            } else if (msg.type === 'incidents:synced' && Array.isArray(msg.payload)) {
+              setIncidents(msg.payload);
+            } else if (msg.type === 'incident:updated' && msg.payload?.id) {
+              setIncidents((prev) =>
+                prev.map((i) => (i.id === msg.payload.id ? msg.payload : i))
+              );
+            } else if (msg.type === 'incident:deleted' && msg.payload?.id) {
+              setIncidents((prev) => prev.filter((i) => i.id !== msg.payload.id));
+            } else if (msg.type === 'emergency:updated') {
+              setActiveEmergency(msg.payload);
+              if (msg.payload?.active) {
+                safetyAudio.playEmergencySiren();
               }
             }
-            return latest;
-          });
+          } catch {
+            // Ignore malformed message
+          }
+        };
+
+        ws.onclose = () => {
+          if (!disposed) {
+            reconnectTimer = setTimeout(connectWs, 3000);
+          }
+        };
+
+        ws.onerror = () => {
+          ws?.close();
+        };
+      } catch {
+        reconnectTimer = setTimeout(connectWs, 3000);
+      }
+    };
+
+    connectWs();
+
+    return () => {
+      disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      ws?.close();
+    };
+  }, [notifyNewIncoming]);
+
+  // 3. Initial server fetch + resilient 2.5s REST polling fallback
+  useEffect(() => {
+    let active = true;
+
+    async function syncFromServer(isInitial: boolean) {
+      const res = await fetchIncidentsFromServer();
+      if (!active || !res.ok) return;
+
+      if (res.data.length > 0) {
+        setIncidents((current) => {
+          if (!isInitial) {
+            const newItems = res.data.filter((item) => !current.some((c) => c.id === item.id));
+            if (newItems.length > 0) {
+              notifyNewIncoming(newItems[0]);
+            }
+          }
+          return res.data;
+        });
+      } else if (!isInitial) {
+        // If server was genuinely emptied and current has items that were deleted remotely, keep in sync
+        setIncidents((current) => (current.length === 0 ? current : res.data));
+      }
+    }
+
+    syncFromServer(true);
+    const pollInterval = setInterval(() => syncFromServer(false), 2500);
+
+    return () => {
+      active = false;
+      clearInterval(pollInterval);
+    };
+  }, [notifyNewIncoming]);
+
+  // 4. Import helper for Google Drive -> Matrix synchronization
+  const handleImportFromDrive = useCallback(async (driveIncidents: Incident[]): Promise<number> => {
+    const newItems = driveIncidents.filter(
+      (d) => !knownIdsRef.current.has(d.id) && !incidents.some((c) => c.code === d.code)
+    );
+    if (newItems.length === 0) return 0;
+
+    try {
+      const syncedList = await syncBatchIncidentsApi(newItems);
+      if (syncedList.length > 0) {
+        setIncidents(syncedList);
+      } else {
+        setIncidents((prev) => mergeUniqueIncidents(newItems, prev));
+      }
+    } catch {
+      setIncidents((prev) => mergeUniqueIncidents(newItems, prev));
+    }
+
+    notifyNewIncoming(newItems[0]);
+    return newItems.length;
+  }, [incidents, notifyNewIncoming]);
+
+  // 5. Auto-sync incoming satellite reports from Google Drive when prevred3@gmail.com is connected in Matrix
+  useEffect(() => {
+    if (appMode !== 'matrix') return;
+
+    const drivePoll = setInterval(async () => {
+      try {
+        const token = await getAccessToken();
+        if (!token) return;
+        const driveIncidents = await fetchIncidentsFromDrive(token);
+        if (driveIncidents.length > 0) {
+          await handleImportFromDrive(driveIncidents);
         }
       } catch {
-        // Silent sync catch
+        // Silent background Drive poll
       }
-    }, 2500);
+    }, 15000);
 
-    return () => clearInterval(pollInterval);
-  }, []);
+    return () => clearInterval(drivePoll);
+  }, [appMode, handleImportFromDrive]);
 
   // Persist data changes to localStorage
   useEffect(() => {
@@ -122,34 +310,33 @@ export default function App() {
     safetyAudio.soundEnabled = next;
   };
 
-  const handleAddIncident = async (newIncident: Incident) => {
-    // Optimistic UI update
-    setIncidents((prev) => [newIncident, ...prev]);
-    setMySatelliteIncidents((prev) => [newIncident, ...prev]);
-    safetyAudio.playIncidentAlert(newIncident.severity);
-
-    // If it was an accident with lost time, reset days counter
+  const handleAddIncident = async (
+    newIncident: Incident,
+    options?: { skipApi?: boolean }
+  ): Promise<Incident> => {
     if (newIncident.type === 'Accidente con Baja (LTI)') {
       setDaysWithoutLTI(0);
     }
 
-    // Immediately transmit to shared Express server so Matrix receives it in real time
-    try {
-      const saved = await createIncidentApi(newIncident);
-      if (saved) {
-        setIncidents((prev) => prev.map((i) => (i.id === newIncident.id ? saved : i)));
-      }
-      return saved;
-    } catch (err) {
-      console.warn('Fallo al guardar en servidor:', err);
-      throw err;
+    if (options?.skipApi) {
+      setIncidents((prev) => mergeUniqueIncidents([newIncident], prev));
+      setMySatelliteIncidents((prev) => mergeUniqueIncidents([newIncident], prev));
+      postToBroadcast('incident:created', newIncident);
+      return newIncident;
     }
+
+    // Transmit to shared Express server FIRST so we know with certainty whether Matrix received it
+    const saved = await createIncidentApi(newIncident);
+    setIncidents((prev) => mergeUniqueIncidents([saved], prev));
+    setMySatelliteIncidents((prev) => mergeUniqueIncidents([saved], prev));
+    safetyAudio.playIncidentAlert(saved.severity);
+    postToBroadcast('incident:created', saved);
+    return saved;
   };
 
   const handleUpdateIncident = async (updated: Incident) => {
-    setIncidents((prev) =>
-      prev.map((i) => (i.id === updated.id ? updated : i))
-    );
+    setIncidents((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
+    postToBroadcast('incident:updated', updated);
     try {
       await updateIncidentApi(updated);
     } catch (err) {
@@ -158,14 +345,13 @@ export default function App() {
   };
 
   const handleDeleteIncident = async (id: string) => {
-    // 1. Optimistic removal from state
     setIncidents((prev) => prev.filter((i) => i.id !== id));
     setMySatelliteIncidents((prev) => prev.filter((i) => i.id !== id));
     if (selectedIncidentForDossier?.id === id) {
       setSelectedIncidentForDossier(null);
     }
+    postToBroadcast('incident:deleted', { id });
 
-    // 2. Call backend DELETE endpoint
     try {
       await deleteIncidentApi(id);
     } catch (err) {
@@ -173,11 +359,69 @@ export default function App() {
     }
   };
 
-
-  // Trigger emergency notice from satellite field
-  const handleTriggerFieldEmergency = (location: string, message: string) => {
+  // Trigger emergency notice from satellite field -> actually sends SOS state + critical incident to Matrix!
+  const handleTriggerFieldEmergency = async (location: string, message: string) => {
     safetyAudio.playEmergencySiren();
-    console.warn(`Alerta de Terreno en ${location}: ${message}`);
+    const emergencyPayload: EmergencyState = {
+      active: true,
+      type: 'Alerta SOS Terreno',
+      location,
+      triggeredAt: new Date().toISOString(),
+      message,
+      accountedWorkers: 142,
+      totalWorkers: 150,
+      assemblyPoint: 'Punto de Encuentro 1 (Zona Norte - Estacionamiento)'
+    };
+
+    setActiveEmergency(emergencyPayload);
+    postToBroadcast('emergency:updated', emergencyPayload);
+    await updateEmergencyApi(emergencyPayload);
+
+    const sosIncident: Incident = {
+      id: `sos-${Date.now()}`,
+      code: `SOS-${Math.floor(1000 + Math.random() * 9000)}`,
+      timestamp: new Date().toISOString(),
+      timeFormatted: 'ALERTA SOS EN DIRECTO',
+      title: `¡ALERTA SOS DE PÁNICO! ${location}`,
+      description: message,
+      location,
+      type: 'Emergencia / Conato',
+      severity: 'Crítico',
+      status: 'Abierto',
+      reporterName: 'Satélite Móvil SOS',
+      reporterRole: 'Emergencia en Terreno',
+      immediateAction: 'Activación de protocolo de emergencia y alarma general en Matriz PRL.',
+      rootCauseAnalysis: {
+        why1: '',
+        why2: '',
+        why3: '',
+        why4: '',
+        why5: '',
+        rootCauseSummary: ''
+      },
+      correctiveActions: [
+        {
+          action: 'Atender emergencia inmediata en sector reportado y verificar integridad del personal.',
+          assignee: 'Brigada de Emergencia / Matriz PRL',
+          dueDate: 'Inmediata',
+          completed: false,
+          priority: 'Urgente'
+        }
+      ]
+    };
+
+    try {
+      await handleAddIncident(sosIncident);
+    } catch (err) {
+      console.warn('Error al registrar incidente SOS:', err);
+    }
+  };
+
+  const handleDismissEmergency = async () => {
+    const cleared = { active: false };
+    setActiveEmergency(null);
+    postToBroadcast('emergency:updated', cleared);
+    await updateEmergencyApi(cleared);
   };
 
   // Real-time Simulation Helper
@@ -231,7 +475,9 @@ export default function App() {
       ]
     };
 
-    handleAddIncident(simulatedIncident);
+    handleAddIncident(simulatedIncident).catch((err) => {
+      console.warn('Simulación guardada localmente:', err);
+    });
   };
 
   // If in SATELLITE mode, render the lightweight field app
@@ -250,6 +496,7 @@ export default function App() {
           isOpen={showDriveModal}
           onClose={() => setShowDriveModal(false)}
           incidents={incidents}
+          onImportFromDrive={handleImportFromDrive}
         />
       </>
     );
@@ -284,6 +531,7 @@ export default function App() {
 
           <div className="flex items-center gap-2">
             <button
+              type="button"
               onClick={() => setShowDriveModal(true)}
               className="text-blue-400 hover:text-blue-300 font-medium flex items-center gap-1 text-xs cursor-pointer"
             >
@@ -291,6 +539,7 @@ export default function App() {
             </button>
             <span className="text-slate-600">|</span>
             <button
+              type="button"
               onClick={() => handleSetMode('satellite')}
               className="text-amber-400 hover:text-amber-300 font-bold flex items-center gap-1 text-xs cursor-pointer"
             >
@@ -299,6 +548,52 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* Active SOS Alert Banner from Satellite */}
+      {activeEmergency?.active && (
+        <div className="bg-rose-950 border-b border-rose-600 px-4 py-3 text-rose-100 animate-pulse">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+              <div className="text-xs">
+                <strong className="text-white uppercase tracking-wide">
+                  ¡ALERTA SOS RECIBIDA DESDE TERRENO! ({activeEmergency.location})
+                </strong>
+                <span className="block text-rose-200">{activeEmergency.message}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleDismissEmergency}
+              className="px-3 py-1 bg-rose-800 hover:bg-rose-700 text-white text-xs font-bold rounded-lg cursor-pointer shrink-0"
+            >
+              Atender / Silenciar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Real-time Incoming Satellite Report Banner */}
+      {incomingBanner && (
+        <div className="bg-emerald-950/90 border-b border-emerald-500/40 px-4 py-2.5 text-emerald-100">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>
+                <strong>Nuevo reporte recibido desde App Satélite:</strong>{' '}
+                <span className="font-mono text-amber-300">{incomingBanner.code}</span> — {incomingBanner.title}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIncomingBanner(null)}
+              className="text-emerald-300 hover:text-white cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Viewport */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full">
@@ -331,11 +626,16 @@ export default function App() {
       <NewIncidentModal
         isOpen={showReportModal}
         onClose={() => setShowReportModal(false)}
-        onSubmit={handleAddIncident}
+        onSubmit={(inc) => {
+          handleAddIncident(inc).catch((err) => {
+            console.warn('Error al enviar reporte manual al servidor:', err);
+          });
+        }}
         nextIncidentNumber={incidents.length + 43}
       />
 
       <IncidentDossierModal
+        key={selectedIncidentForDossier?.id || 'none'}
         incident={selectedIncidentForDossier}
         onClose={() => setSelectedIncidentForDossier(null)}
         onUpdateIncident={handleUpdateIncident}
@@ -355,6 +655,7 @@ export default function App() {
         isOpen={showDriveModal}
         onClose={() => setShowDriveModal(false)}
         incidents={incidents}
+        onImportFromDrive={handleImportFromDrive}
       />
     </div>
   );

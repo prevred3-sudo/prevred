@@ -1,4 +1,6 @@
 import express from 'express';
+import http from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
@@ -95,7 +97,8 @@ if (!fs.existsSync(DATA_DIR)) {
 let inMemoryIncidents: any[] = [];
 try {
   if (fs.existsSync(DB_FILE)) {
-    inMemoryIncidents = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
+    const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
+    inMemoryIncidents = Array.isArray(parsed) ? parsed : [...INITIAL_SEED_INCIDENTS];
   } else {
     inMemoryIncidents = [...INITIAL_SEED_INCIDENTS];
     fs.writeFileSync(DB_FILE, JSON.stringify(inMemoryIncidents, null, 2));
@@ -125,7 +128,45 @@ function persistDb() {
 
 async function startServer() {
   const app = express();
+  const server = http.createServer(app);
   const PORT = Number(process.env.PORT) || 3000;
+
+  // Dedicated WebSocket server on /ws so it never collides with Vite HMR
+  const wss = new WebSocketServer({ server, path: '/ws' });
+
+  const broadcastEvent = (type: string, payload: unknown) => {
+    const msg = JSON.stringify({ type, payload, serverTime: Date.now() });
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(msg);
+      }
+    });
+  };
+
+  wss.on('connection', (ws) => {
+    // Send authoritative state immediately on connect
+    ws.send(
+      JSON.stringify({
+        type: 'init',
+        payload: {
+          incidents: inMemoryIncidents,
+          emergency: inMemoryEmergency
+        },
+        serverTime: Date.now()
+      })
+    );
+  });
+
+  // CORS middleware for API endpoints
+  app.use('/api', (req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
 
   // Support large base64 photos taken from mobile cameras (up to 25MB)
   app.use(express.json({ limit: '25mb' }));
@@ -137,25 +178,53 @@ async function startServer() {
     res.json({ success: true, data: inMemoryIncidents });
   });
 
-  // 2. Create new incident (called by Satellite Mobile App or Matrix)
+  // 2. Create new incident (idempotent by id - called by Satellite Mobile App or Matrix)
   app.post('/api/incidents', (req, res) => {
     const newInc = req.body;
     if (!newInc || !newInc.title) {
       return res.status(400).json({ success: false, error: 'Título requerido' });
     }
 
-    // Add unique server timestamp and place at beginning of list
+    const incidentId = newInc.id || `inc-${Date.now()}`;
+    const existingIdx = inMemoryIncidents.findIndex((i) => i.id === incidentId);
+    if (existingIdx !== -1) {
+      return res.status(200).json({ success: true, data: inMemoryIncidents[existingIdx], deduplicated: true });
+    }
+
     const incidentToSave = {
       ...newInc,
-      id: newInc.id || `inc-${Date.now()}`,
+      id: incidentId,
       timestamp: newInc.timestamp || new Date().toISOString()
     };
 
     inMemoryIncidents = [incidentToSave, ...inMemoryIncidents];
     persistDb();
+    broadcastEvent('incident:created', incidentToSave);
 
     console.log(`[PRL Realtime] Nuevo incidente recibido desde ${incidentToSave.reporterRole || 'Terreno'}: ${incidentToSave.code} - ${incidentToSave.title}`);
     res.status(201).json({ success: true, data: incidentToSave });
+  });
+
+  // 2b. Batch merge incidents (used by Google Drive / IndexedDB sync)
+  app.post('/api/incidents/batch', (req, res) => {
+    const incomingList = Array.isArray(req.body?.incidents) ? req.body.incidents : [];
+    let addedCount = 0;
+
+    for (const item of incomingList) {
+      if (!item || !item.id || !item.title) continue;
+      if (!inMemoryIncidents.some((existing) => existing.id === item.id || (item.code && existing.code === item.code))) {
+        inMemoryIncidents.unshift(item);
+        addedCount++;
+      }
+    }
+
+    if (addedCount > 0) {
+      inMemoryIncidents.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      persistDb();
+      broadcastEvent('incidents:synced', inMemoryIncidents);
+    }
+
+    res.json({ success: true, addedCount, data: inMemoryIncidents });
   });
 
   // 3. Update existing incident (dossier, 5 whys, CAPA actions)
@@ -169,6 +238,7 @@ async function startServer() {
 
     inMemoryIncidents[idx] = { ...inMemoryIncidents[idx], ...updated };
     persistDb();
+    broadcastEvent('incident:updated', inMemoryIncidents[idx]);
     res.json({ success: true, data: inMemoryIncidents[idx] });
   });
 
@@ -182,6 +252,7 @@ async function startServer() {
 
     inMemoryIncidents = inMemoryIncidents.filter((i) => i.id !== id);
     persistDb();
+    broadcastEvent('incident:deleted', { id });
     console.log(`[PRL Realtime] Incidente/Hallazgo eliminado: ${id} (${existing.code} - ${existing.title})`);
     res.json({ success: true, message: 'Incidente eliminado exitosamente', id });
   });
@@ -194,13 +265,19 @@ async function startServer() {
   app.post('/api/emergency', (req, res) => {
     const nextEmergency = req.body;
     inMemoryEmergency = { ...inMemoryEmergency, ...nextEmergency };
+    broadcastEvent('emergency:updated', inMemoryEmergency);
     console.log(`[PRL Realtime] Estado de emergencia actualizado: Activo=${inMemoryEmergency.active}`);
     res.json({ success: true, data: inMemoryEmergency });
   });
 
   // Health check
   app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', serverTime: new Date().toISOString() });
+    res.json({
+      status: 'ok',
+      serverTime: new Date().toISOString(),
+      incidentCount: inMemoryIncidents.length,
+      connectedClients: wss.clients.size
+    });
   });
 
   // Mount Vite in dev or serve static files in production
@@ -219,7 +296,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`PrevRiesgos Server running on http://0.0.0.0:${PORT}`);
   });
 }

@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { X, Printer, Shield, CheckCircle, Clock, AlertTriangle, Plus, Trash2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Printer, CheckCircle, AlertTriangle, Plus, Trash2 } from 'lucide-react';
 import { Incident, RootCauseAnalysis, CorrectiveAction } from '../types';
 
 interface IncidentDossierModalProps {
@@ -15,27 +15,41 @@ export const IncidentDossierModal: React.FC<IncidentDossierModalProps> = ({
   onUpdateIncident,
   onDeleteIncident
 }) => {
-  if (!incident) return null;
-
   const [activeTab, setActiveTab] = useState<'details' | '5whys' | 'actions'>('details');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
   // Local editable states
-  const [status, setStatus] = useState(incident.status);
-  const [why1, setWhy1] = useState(incident.rootCauseAnalysis?.why1 || '');
-  const [why2, setWhy2] = useState(incident.rootCauseAnalysis?.why2 || '');
-  const [why3, setWhy3] = useState(incident.rootCauseAnalysis?.why3 || '');
-  const [why4, setWhy4] = useState(incident.rootCauseAnalysis?.why4 || '');
-  const [why5, setWhy5] = useState(incident.rootCauseAnalysis?.why5 || '');
-  const [rootCauseSummary, setRootCauseSummary] = useState(incident.rootCauseAnalysis?.rootCauseSummary || '');
-  const [actions, setActions] = useState<CorrectiveAction[]>(incident.correctiveActions || []);
+  const [status, setStatus] = useState<Incident['status']>(incident?.status || 'Abierto');
+  const [why1, setWhy1] = useState(incident?.rootCauseAnalysis?.why1 || '');
+  const [why2, setWhy2] = useState(incident?.rootCauseAnalysis?.why2 || '');
+  const [why3, setWhy3] = useState(incident?.rootCauseAnalysis?.why3 || '');
+  const [why4, setWhy4] = useState(incident?.rootCauseAnalysis?.why4 || '');
+  const [why5, setWhy5] = useState(incident?.rootCauseAnalysis?.why5 || '');
+  const [rootCauseSummary, setRootCauseSummary] = useState(incident?.rootCauseAnalysis?.rootCauseSummary || '');
+  const [actions, setActions] = useState<CorrectiveAction[]>(incident?.correctiveActions || []);
 
   // New action form state
   const [newActionText, setNewActionText] = useState('');
   const [newActionAssignee, setNewActionAssignee] = useState('');
   const [newActionDueDate, setNewActionDueDate] = useState('48 horas');
   const [newActionPriority, setNewActionPriority] = useState<'Media' | 'Alta' | 'Urgente'>('Alta');
+
+  useEffect(() => {
+    if (!incident) return;
+    setActiveTab('details');
+    setShowDeleteConfirm(false);
+    setStatus(incident.status);
+    setWhy1(incident.rootCauseAnalysis?.why1 || '');
+    setWhy2(incident.rootCauseAnalysis?.why2 || '');
+    setWhy3(incident.rootCauseAnalysis?.why3 || '');
+    setWhy4(incident.rootCauseAnalysis?.why4 || '');
+    setWhy5(incident.rootCauseAnalysis?.why5 || '');
+    setRootCauseSummary(incident.rootCauseAnalysis?.rootCauseSummary || '');
+    setActions(incident.correctiveActions || []);
+  }, [incident]);
+
+  if (!incident) return null;
 
   const handleSave = () => {
     const updatedRootCause: RootCauseAnalysis = {

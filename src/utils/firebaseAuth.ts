@@ -3,8 +3,6 @@ import {
   getAuth,
   signInWithPopup,
   GoogleAuthProvider,
-  onAuthStateChanged,
-  User,
   signOut
 } from 'firebase/auth';
 import firebaseConfig from '@/firebase-applet-config.json';
@@ -28,6 +26,26 @@ let cachedAccessToken: string | null = null;
 let cachedAppUser: AppAuthUser | null = null;
 let isSigningIn = false;
 
+type AuthListener = (user: AppAuthUser | null, token: string | null) => void;
+const listeners = new Set<AuthListener>();
+
+function notifyListeners() {
+  listeners.forEach((cb) => {
+    try {
+      cb(cachedAppUser, cachedAccessToken);
+    } catch {
+      // Ignore listener errors
+    }
+  });
+}
+
+export function subscribeGoogleAuth(listener: AuthListener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
 // Global declaration for Google Identity Services (GSI)
 declare global {
   interface Window {
@@ -38,8 +56,9 @@ declare global {
             client_id: string;
             scope: string;
             callback: (response: { access_token?: string; error?: string; error_description?: string }) => void;
-            error_callback?: (error: unknown) => void;
+            error_callback?: (error: { type?: string; message?: string } | unknown) => void;
             prompt?: string;
+            login_hint?: string;
             hint?: string;
           }) => {
             requestAccessToken: (overrideConfig?: { prompt?: string }) => void;
@@ -78,10 +97,12 @@ export const signInWithGoogleIdentityServices = async (): Promise<{
         client_id: clientId,
         scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email',
         prompt: 'select_account',
-        hint: 'prevred3@gmail.com',
+        login_hint: 'prevred3@gmail.com',
         callback: async (tokenResponse) => {
           if (tokenResponse.error || !tokenResponse.access_token) {
-            return reject(new Error(tokenResponse.error_description || tokenResponse.error || 'Permiso denegado por el usuario'));
+            return reject(
+              new Error(tokenResponse.error_description || tokenResponse.error || 'Permiso denegado por el usuario')
+            );
           }
 
           const accessToken = tokenResponse.access_token;
@@ -102,6 +123,7 @@ export const signInWithGoogleIdentityServices = async (): Promise<{
                 photoURL: profile.picture || null
               };
               cachedAppUser = appUser;
+              notifyListeners();
               return resolve({ user: appUser, accessToken });
             }
           } catch {
@@ -115,16 +137,24 @@ export const signInWithGoogleIdentityServices = async (): Promise<{
             photoURL: null
           };
           cachedAppUser = fallbackUser;
+          notifyListeners();
           resolve({ user: fallbackUser, accessToken });
         },
-        error_callback: (err) => {
-          reject(err);
+        error_callback: (err: unknown) => {
+          const errObj = err as { type?: string; message?: string } | null;
+          if (errObj?.type === 'popup_closed') {
+            reject(new Error('Ventana de inicio de sesión cerrada antes de completar el acceso.'));
+          } else if (errObj?.type === 'popup_failed_to_open') {
+            reject(new Error('popup-blocked: El navegador bloqueó la ventana emergente de Google.'));
+          } else {
+            reject(new Error(errObj?.message || errObj?.type || 'Error en la autenticación con Google'));
+          }
         }
       });
 
       client.requestAccessToken();
     } catch (err) {
-      reject(err);
+      reject(err instanceof Error ? err : new Error(String(err)));
     }
   });
 };
@@ -158,6 +188,7 @@ export const signInWithFirebasePopup = async (): Promise<{
     photoURL: result.user.photoURL
   };
   cachedAppUser = appUser;
+  notifyListeners();
   return { user: appUser, accessToken };
 };
 
@@ -173,7 +204,6 @@ export const googleSignIn = async (): Promise<{ user: AppAuthUser; accessToken: 
 
   isSigningIn = true;
   try {
-    // If GIS script is loaded in window, prefer GIS to avoid unauthorized-domain
     if (typeof window !== 'undefined' && window.google?.accounts?.oauth2) {
       try {
         return await signInWithGoogleIdentityServices();
@@ -183,7 +213,6 @@ export const googleSignIn = async (): Promise<{ user: AppAuthUser; accessToken: 
       }
     }
 
-    // Otherwise use Firebase Auth
     return await signInWithFirebasePopup();
   } finally {
     isSigningIn = false;
@@ -209,6 +238,7 @@ export const getAccessToken = async (): Promise<string | null> => {
 
 export const setAccessToken = (token: string | null) => {
   cachedAccessToken = token;
+  notifyListeners();
 };
 
 export const logoutGoogle = async () => {
@@ -219,4 +249,5 @@ export const logoutGoogle = async () => {
   }
   cachedAccessToken = null;
   cachedAppUser = null;
+  notifyListeners();
 };

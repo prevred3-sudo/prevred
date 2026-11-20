@@ -89,7 +89,7 @@ export interface InspectionChecklist {
 
 export interface EmergencyState {
   active: boolean;
-  type: 'Evacuación General' | 'Derrame Químico' | 'Conato de Incendio' | 'Atrapamiento Mecánico' | 'Emergencia Médica';
+  type: 'Evacuación General' | 'Derrame Químico' | 'Conato de Incendio' | 'Atrapamiento Mecánico' | 'Emergencia Médica' | 'Alerta SOS Terreno';
   location: string;
   triggeredAt: string;
   message: string;

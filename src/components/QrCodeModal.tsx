@@ -187,8 +187,8 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({
             </button>
           </div>
 
-          <p className="text-[11px] text-slate-400 text-center pt-1">
-            Puedes imprimir este código QR y pegarlo en el pañol de herramientas o casilleros para que los operarios reporten al instante.
+          <p className="text-[11px] text-slate-400 text-center pt-1 leading-relaxed">
+            Para sincronización instantánea directa, la Matriz y la App Satélite deben abrirse en la misma URL (<strong>Enlace Actual</strong> o ambos en el <strong>Enlace Compartido</strong>). Si están en redes/URLs distintas, conecta <strong>Google Drive (prevred3@gmail.com)</strong> para sincronizar reportes en la nube.
           </p>
         </div>
       </div>
