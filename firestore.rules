@@ -1,0 +1,184 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'prevred3@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Incident Validation Blueprint ---
+    function isValidIncidentType(t) {
+      return t in [
+        'Accidente con Baja (LTI)',
+        'Accidente sin Baja (FAC/MTC)',
+        'Casi Accidente (Near Miss)',
+        'Condición Insegura',
+        'Acto Inseguro',
+        'Emergencia / Conato'
+      ];
+    }
+
+    function isValidSeverity(s) {
+      return s in ['Leve', 'Moderado', 'Grave', 'Crítico'];
+    }
+
+    function isValidStatus(st) {
+      return st in ['Abierto', 'En Investigación', 'Acción en Curso', 'Cerrado'];
+    }
+
+    function isValidIncidentData(data) {
+      return data.keys().hasAll([
+          'id', 'code', 'timestamp', 'timeFormatted', 'title', 'description',
+          'location', 'type', 'severity', 'status', 'reporterName', 'reporterRole',
+          'reporterUid', 'immediateAction', 'correctiveActions', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'code', 'timestamp', 'timeFormatted', 'title', 'description',
+          'location', 'type', 'severity', 'status', 'reporterName', 'reporterRole',
+          'reporterUid', 'affectedPerson', 'immediateAction', 'photoUrl',
+          'rootCauseAnalysis', 'correctiveActions', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.code is string && data.code.size() >= 2 && data.code.size() <= 40
+        && data.timestamp is string && data.timestamp.size() >= 10 && data.timestamp.size() <= 64
+        && data.timeFormatted is string && data.timeFormatted.size() <= 100
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 300
+        && data.description is string && data.description.size() <= 2000
+        && data.location is string && data.location.size() >= 1 && data.location.size() <= 300
+        && isValidIncidentType(data.type)
+        && isValidSeverity(data.severity)
+        && isValidStatus(data.status)
+        && data.reporterName is string && data.reporterName.size() >= 1 && data.reporterName.size() <= 120
+        && data.reporterRole is string && data.reporterRole.size() >= 1 && data.reporterRole.size() <= 120
+        && data.reporterUid is string && data.reporterUid.size() >= 1 && data.reporterUid.size() <= 128
+        && data.immediateAction is string && data.immediateAction.size() <= 1000
+        && (!('affectedPerson' in data) || (data.affectedPerson is string && data.affectedPerson.size() <= 120))
+        && (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 700000))
+        && (!('rootCauseAnalysis' in data) || (data.rootCauseAnalysis is map && data.rootCauseAnalysis.keys().hasOnly(['why1', 'why2', 'why3', 'why4', 'why5', 'rootCauseSummary'])))
+        && data.correctiveActions is list && data.correctiveActions.size() <= 25
+        && (data.correctiveActions.size() == 0 || data.correctiveActions[0] is map)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // --- Emergency Validation Blueprint ---
+    function isValidEmergencyData(data) {
+      return data.keys().hasAll([
+          'active', 'type', 'location', 'triggeredAt', 'message', 'triggeredByUid', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'active', 'type', 'location', 'triggeredAt', 'message', 'triggeredByUid',
+          'accountedWorkers', 'totalWorkers', 'assemblyPoint', 'updatedAt'
+        ])
+        && data.active is bool
+        && data.type is string && data.type.size() >= 1 && data.type.size() <= 80
+        && data.location is string && data.location.size() >= 1 && data.location.size() <= 300
+        && data.triggeredAt is string && data.triggeredAt.size() <= 64
+        && data.message is string && data.message.size() <= 1000
+        && data.triggeredByUid is string && data.triggeredByUid.size() >= 1 && data.triggeredByUid.size() <= 128
+        && (!('accountedWorkers' in data) || data.accountedWorkers is int)
+        && (!('totalWorkers' in data) || data.totalWorkers is int)
+        && (!('assemblyPoint' in data) || (data.assemblyPoint is string && data.assemblyPoint.size() <= 200))
+        && data.updatedAt is timestamp;
+    }
+
+    // --- Collection: /incidents/{incidentId} ---
+    match /incidents/{incidentId} {
+      allow get: if isValidId(incidentId) && (
+        isAdmin() || (isVerifiedUser() && existing().reporterUid == request.auth.uid)
+      );
+
+      allow list: if isAdmin() || (
+        isVerifiedUser() && resource.data.reporterUid == request.auth.uid
+      );
+
+      allow create: if isValidId(incidentId)
+        && isVerifiedUser()
+        && isValidIncidentData(incoming())
+        && incoming().id == incidentId
+        && incoming().reporterUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(incidentId)
+        && isVerifiedUser()
+        && isValidIncidentData(incoming())
+        && incoming().id == existing().id
+        && incoming().reporterUid == existing().reporterUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            existing().reporterUid == request.auth.uid
+            && existing().status != 'Cerrado'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'immediateAction', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isValidId(incidentId) && isAdmin();
+    }
+
+    // --- Collection: /emergencies/{emergencyId} ---
+    match /emergencies/{emergencyId} {
+      allow get: if isValidId(emergencyId) && isVerifiedUser();
+      allow list: if isAdmin();
+
+      allow create: if isValidId(emergencyId)
+        && isVerifiedUser()
+        && isValidEmergencyData(incoming())
+        && incoming().triggeredByUid == request.auth.uid
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(emergencyId)
+        && isVerifiedUser()
+        && isValidEmergencyData(incoming())
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            incoming().active == true
+            && incoming().triggeredByUid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['active', 'type', 'location', 'triggeredAt', 'message', 'triggeredByUid', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isValidId(emergencyId) && isAdmin();
+    }
+
+    // --- Collection: /admins/{userId} ---
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && (isAdmin() || (isVerifiedUser() && request.auth.uid == userId));
+      allow list: if false;
+      allow create, update, delete: if false;
+    }
+  }
+}

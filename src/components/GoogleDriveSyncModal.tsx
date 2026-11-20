@@ -17,8 +17,8 @@ import {
   getAccessToken,
   getCurrentAppUser,
   AppAuthUser,
-  signInWithGoogleIdentityServices,
-  signInWithFirebasePopup
+  googleSignIn,
+  signInWithGoogleIdentityServices
 } from '../utils/firebaseAuth';
 import {
   uploadMasterSummaryToDrive,
@@ -83,22 +83,36 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
 
   if (!isOpen) return null;
 
+  const ensureDriveToken = async (): Promise<string | null> => {
+    const existing = token || (await getAccessToken());
+    if (existing) {
+      setToken(existing);
+      return existing;
+    }
+    const res = await signInWithGoogleIdentityServices();
+    if (res?.accessToken) {
+      setToken(res.accessToken);
+      if (!user && res.user) setUser(res.user);
+      return res.accessToken;
+    }
+    return null;
+  };
+
   const handleSignIn = async () => {
     setIsSigningIn(true);
     setErrorMsg('');
     try {
-      let result;
-      try {
-        result = await signInWithGoogleIdentityServices();
-      } catch (gisErr) {
-        console.warn('GSI no completó, intentando Firebase Popup:', gisErr);
-        result = await signInWithFirebasePopup();
+      const result = await googleSignIn();
+      let accessToken = result.accessToken;
+      if (!accessToken) {
+        const gisResult = await signInWithGoogleIdentityServices();
+        accessToken = gisResult.accessToken;
       }
 
-      if (result) {
-        setUser(result.user);
-        setToken(result.accessToken);
-        await loadFiles(result.accessToken);
+      setUser(result.user);
+      setToken(accessToken || null);
+      if (accessToken) {
+        await loadFiles(accessToken);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -142,25 +156,32 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
   };
 
   const handleExecuteSync = async () => {
-    if (!token) return;
     setIsSyncing(true);
     setErrorMsg('');
     setSyncSuccessMsg('');
-    setSyncProgress('Iniciando subida de expediente maestro...');
+    setSyncProgress('Verificando autorización de Google Drive...');
     try {
-      const uploadedMaster = await uploadMasterSummaryToDrive(token, incidents);
+      const activeToken = await ensureDriveToken();
+      if (!activeToken) {
+        setErrorMsg('No se obtuvo permiso de acceso a Google Drive. Intente nuevamente.');
+        setSyncProgress('');
+        return;
+      }
+
+      setSyncProgress('Iniciando subida de expediente maestro...');
+      const uploadedMaster = await uploadMasterSummaryToDrive(activeToken, incidents);
 
       const toUpload = incidents.slice(0, 5);
       for (let i = 0; i < toUpload.length; i++) {
         const item = toUpload[i];
         setSyncProgress(`Subiendo reporte ${i + 1}/${toUpload.length}: ${item.code}${item.photoUrl ? ' (con fotografía)' : ''}...`);
-        await saveIncidentToDrive(token, item);
+        await saveIncidentToDrive(activeToken, item);
       }
 
       setSyncSuccessMsg(`¡Sincronización completa con Google Drive! Se subió el expediente maestro (${uploadedMaster.name}) y los reportes con fotografías.`);
       setConfirmSync(false);
       setSyncProgress('');
-      await loadFiles(token);
+      await loadFiles(activeToken);
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al sincronizar con Google Drive');
       setSyncProgress('');
@@ -170,12 +191,17 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
   };
 
   const handlePullFromDrive = async () => {
-    if (!token) return;
     setIsPullingFromDrive(true);
     setErrorMsg('');
     setSyncSuccessMsg('');
     try {
-      const driveIncidents = await fetchIncidentsFromDrive(token);
+      const activeToken = await ensureDriveToken();
+      if (!activeToken) {
+        setErrorMsg('No se obtuvo permiso de acceso a Google Drive.');
+        return;
+      }
+
+      const driveIncidents = await fetchIncidentsFromDrive(activeToken);
       if (driveIncidents.length === 0) {
         setSyncSuccessMsg('Se revisó Google Drive (prevred3@gmail.com), pero no hay informes nuevos pendientes de importar.');
       } else if (onImportFromDrive) {
@@ -186,7 +212,7 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
           setSyncSuccessMsg(`Los ${driveIncidents.length} reportes encontrados en Google Drive ya están sincronizados en la Matriz.`);
         }
       }
-      await loadFiles(token);
+      await loadFiles(activeToken);
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Error al importar reportes desde Google Drive');
     } finally {
@@ -456,7 +482,14 @@ export const GoogleDriveSyncModal: React.FC<GoogleDriveSyncModalProps> = ({
                 </span>
                 <button
                   type="button"
-                  onClick={() => token && loadFiles(token)}
+                  onClick={async () => {
+                    try {
+                      const activeToken = await ensureDriveToken();
+                      if (activeToken) await loadFiles(activeToken);
+                    } catch (err) {
+                      setErrorMsg(err instanceof Error ? err.message : 'Error al actualizar archivos de Drive');
+                    }
+                  }}
                   className="hover:text-amber-400 flex items-center gap-1 text-[11px] cursor-pointer"
                 >
                   <RefreshCw className="w-3 h-3" />

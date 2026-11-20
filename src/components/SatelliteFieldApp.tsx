@@ -27,6 +27,8 @@ import { useOfflineSyncQueue } from '../utils/useOfflineSyncQueue';
 import { getAccessToken, getCurrentAppUser } from '../utils/firebaseAuth';
 import { saveIncidentToDrive } from '../services/googleDriveService';
 
+import type { User } from 'firebase/auth';
+
 interface SatelliteFieldAppProps {
   onBackToMatrix: () => void;
   onSubmitIncident: (incident: Incident, options?: { skipApi?: boolean }) => Promise<any> | void;
@@ -34,6 +36,9 @@ interface SatelliteFieldAppProps {
   onTriggerEmergency: (location: string, message: string) => void;
   onDeleteIncident?: (id: string) => void;
   onOpenDriveModal?: () => void;
+  cloudUser?: User | null;
+  onConnectCloud?: () => void;
+  isConnectingCloud?: boolean;
 }
 
 const FIELD_ZONES = [
@@ -51,7 +56,10 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   myRecentIncidents,
   onTriggerEmergency,
   onDeleteIncident,
-  onOpenDriveModal
+  onOpenDriveModal,
+  cloudUser,
+  onConnectCloud,
+  isConnectingCloud
 }) => {
   const { isInstallable, install, isIOS } = usePWAInstall();
 
@@ -122,7 +130,7 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
           img.onload = () => {
             try {
               const canvas = document.createElement('canvas');
-              const MAX_DIM = 1280;
+              const MAX_DIM = 1024;
               let width = img.width;
               let height = img.height;
 
@@ -139,7 +147,10 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
               const ctx = canvas.getContext('2d');
               if (ctx) {
                 ctx.drawImage(img, 0, 0, width, height);
-                const compressed = canvas.toDataURL('image/jpeg', 0.82);
+                let compressed = canvas.toDataURL('image/jpeg', 0.75);
+                if (compressed.length > 620000) {
+                  compressed = canvas.toDataURL('image/jpeg', 0.55);
+                }
                 setCapturedPhoto(compressed);
               } else {
                 setCapturedPhoto(rawResult);
@@ -363,16 +374,21 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
 
       {/* Satélite-to-Matrix Realtime Bridge Status Card */}
       <div className="bg-slate-900/80 border-b border-slate-800 px-4 py-2 text-xs">
-        <div className="max-w-md mx-auto flex items-center justify-between">
+        <div className="max-w-md mx-auto flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-slate-300">
             <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
             <span className="text-[11px]">
-              {isOnline ? 'Sincronización en vivo con Matriz' : 'Sin red: Cola IndexedDB'}
+              {cloudUser
+                ? `Nube Firestore Activa (${cloudUser.email})`
+                : isOnline
+                ? 'Sincronización local con Matriz'
+                : 'Sin red: Cola IndexedDB'}
             </span>
           </div>
           <div className="flex items-center gap-2">
             {onOpenDriveModal && (
               <button
+                type="button"
                 onClick={onOpenDriveModal}
                 className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1 cursor-pointer"
               >
@@ -382,6 +398,7 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
               </button>
             )}
             <button
+              type="button"
               onClick={() => triggerSync(true)}
               disabled={isSyncing || !isOnline}
               className="text-[11px] text-amber-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer disabled:opacity-40"
@@ -393,6 +410,25 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Cloud Connect Banner when opened on mobile without Google sign-in */}
+      {!cloudUser && onConnectCloud && (
+        <div className="bg-blue-950/80 border-b border-blue-700/50 px-4 py-2 text-xs text-blue-100">
+          <div className="max-w-md mx-auto flex items-center justify-between gap-2">
+            <span className="text-[11px] leading-snug">
+              Conecta tu cuenta Google para enviar reportes directo a la Matriz en otro equipo/red.
+            </span>
+            <button
+              type="button"
+              onClick={onConnectCloud}
+              disabled={isConnectingCloud}
+              className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded text-[11px] shrink-0 cursor-pointer disabled:opacity-50"
+            >
+              {isConnectingCloud ? 'Conectando...' : 'Conectar Nube'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Offline Queue Reattempt & Backoff Status Strip */}
       {pendingCount > 0 && (

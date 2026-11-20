@@ -1,0 +1,191 @@
+{
+  "entities": {
+    "Incident": {
+      "title": "Incident",
+      "description": "Safety incident or field finding submitted from Satellite mobile app or Matrix command center",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "timestamp": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 64
+        },
+        "timeFormatted": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "location": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "Accidente con Baja (LTI)",
+            "Accidente sin Baja (FAC/MTC)",
+            "Casi Accidente (Near Miss)",
+            "Condición Insegura",
+            "Acto Inseguro",
+            "Emergencia / Conato"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["Leve", "Moderado", "Grave", "Crítico"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Abierto", "En Investigación", "Acción en Curso", "Cerrado"]
+        },
+        "reporterName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "reporterRole": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "reporterUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "affectedPerson": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "immediateAction": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 700000
+        },
+        "rootCauseAnalysis": {
+          "type": "object",
+          "description": "5 Whys analysis map"
+        },
+        "correctiveActions": {
+          "type": "array",
+          "description": "CAPA corrective actions bounded to max 25 items"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "code",
+        "timestamp",
+        "timeFormatted",
+        "title",
+        "description",
+        "location",
+        "type",
+        "severity",
+        "status",
+        "reporterName",
+        "reporterRole",
+        "reporterUid",
+        "immediateAction",
+        "correctiveActions",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "EmergencyAlert": {
+      "title": "EmergencyAlert",
+      "description": "Live SOS emergency state triggered from Satellite or dismissed by Matrix",
+      "type": "object",
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "location": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "triggeredAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "triggeredByUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["active", "type", "location", "triggeredAt", "message", "triggeredByUid", "updatedAt"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Registered PRL administrator record",
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["admin"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["role", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/incidents/{incidentId}": {
+      "schema": { "$ref": "#/entities/Incident" },
+      "description": "Real-time safety incidents and field reports synchronized between Satellite and Matrix"
+    },
+    "/emergencies/{emergencyId}": {
+      "schema": { "$ref": "#/entities/EmergencyAlert" },
+      "description": "Real-time SOS emergency alert state"
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "PRL supervisor admin directory"
+    }
+  }
+}

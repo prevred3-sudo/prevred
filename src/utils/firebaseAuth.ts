@@ -3,12 +3,80 @@ import {
   getAuth,
   signInWithPopup,
   GoogleAuthProvider,
+  onAuthStateChanged,
+  User,
   signOut
 } from 'firebase/auth';
+import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
 import firebaseConfig from '@/firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+// Startup Firestore connection check per Firebase integration specification
+async function testConnection() {
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error('Please check your Firebase configuration (Firestore client is offline).');
+    }
+  }
+}
+testConnection();
+
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+export function handleFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): never {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo:
+        auth.currentUser?.providerData?.map((provider) => ({
+          providerId: provider.providerId,
+          email: provider.email
+        })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 export const SCOPES = [
   'https://www.googleapis.com/auth/drive.file'
@@ -46,6 +114,21 @@ export function subscribeGoogleAuth(listener: AuthListener): () => void {
   };
 }
 
+export function subscribeFirebaseAuthState(cb: (user: User | null) => void): () => void {
+  return onAuthStateChanged(auth, (firebaseUser) => {
+    if (firebaseUser) {
+      cachedAppUser = {
+        uid: firebaseUser.uid,
+        email: firebaseUser.email,
+        displayName: firebaseUser.displayName,
+        photoURL: firebaseUser.photoURL
+      };
+      notifyListeners();
+    }
+    cb(firebaseUser);
+  });
+}
+
 // Global declaration for Google Identity Services (GSI)
 declare global {
   interface Window {
@@ -70,9 +153,7 @@ declare global {
 }
 
 /**
- * Direct Google Identity Services (GIS) OAuth token flow.
- * Directly requests an OAuth 2.0 token from Google for the specified client ID,
- * bypassing Firebase Auth's domain restrictions (fixing auth/unauthorized-domain).
+ * Direct Google Identity Services (GIS) OAuth token flow for Google Drive.
  */
 export const signInWithGoogleIdentityServices = async (): Promise<{
   user: AppAuthUser;
@@ -108,7 +189,6 @@ export const signInWithGoogleIdentityServices = async (): Promise<{
           const accessToken = tokenResponse.access_token;
           cachedAccessToken = accessToken;
 
-          // Fetch user info with the access token
           try {
             const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
               headers: { Authorization: `Bearer ${accessToken}` }
@@ -160,7 +240,7 @@ export const signInWithGoogleIdentityServices = async (): Promise<{
 };
 
 /**
- * Fallback to Firebase Auth popup if GIS is not available
+ * Firebase Auth popup (authenticates both Cloud Firestore AND provides Google Drive OAuth token)
  */
 export const signInWithFirebasePopup = async (): Promise<{
   user: AppAuthUser;
@@ -175,12 +255,11 @@ export const signInWithFirebasePopup = async (): Promise<{
 
   const result = await signInWithPopup(auth, provider);
   const credential = GoogleAuthProvider.credentialFromResult(result);
-  if (!credential?.accessToken) {
-    throw new Error('No se obtuvo el token de acceso de Google Drive.');
+  const accessToken = credential?.accessToken || '';
+  if (accessToken) {
+    cachedAccessToken = accessToken;
   }
 
-  const accessToken = credential.accessToken;
-  cachedAccessToken = accessToken;
   const appUser: AppAuthUser = {
     uid: result.user.uid,
     email: result.user.email,
@@ -194,8 +273,8 @@ export const signInWithFirebasePopup = async (): Promise<{
 
 /**
  * Primary sign-in function:
- * First attempts Google Identity Services (which fixes auth/unauthorized-domain),
- * and falls back to Firebase Popup.
+ * Uses Firebase Auth Popup first (so Cloud Firestore + Google Drive both work seamlessly),
+ * and falls back to GIS if needed.
  */
 export const googleSignIn = async (): Promise<{ user: AppAuthUser; accessToken: string }> => {
   if (isSigningIn) {
@@ -204,23 +283,21 @@ export const googleSignIn = async (): Promise<{ user: AppAuthUser; accessToken: 
 
   isSigningIn = true;
   try {
-    if (typeof window !== 'undefined' && window.google?.accounts?.oauth2) {
-      try {
+    try {
+      return await signInWithFirebasePopup();
+    } catch (firebaseErr) {
+      console.warn('Firebase Popup falló, intentando GIS como alternativa:', firebaseErr);
+      if (typeof window !== 'undefined' && window.google?.accounts?.oauth2) {
         return await signInWithGoogleIdentityServices();
-      } catch (gisError) {
-        console.warn('GIS falló, intentando Firebase Popup como alternativa:', gisError);
-        return await signInWithFirebasePopup();
       }
+      throw firebaseErr;
     }
-
-    return await signInWithFirebasePopup();
   } finally {
     isSigningIn = false;
   }
 };
 
 export const getCurrentAppUser = (): AppAuthUser | null => {
-  if (cachedAppUser) return cachedAppUser;
   if (auth.currentUser) {
     return {
       uid: auth.currentUser.uid,
@@ -229,6 +306,7 @@ export const getCurrentAppUser = (): AppAuthUser | null => {
       photoURL: auth.currentUser.photoURL
     };
   }
+  if (cachedAppUser) return cachedAppUser;
   return null;
 };
 

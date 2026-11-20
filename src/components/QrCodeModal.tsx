@@ -188,7 +188,7 @@ export const QrCodeModal: React.FC<QrCodeModalProps> = ({
           </div>
 
           <p className="text-[11px] text-slate-400 text-center pt-1 leading-relaxed">
-            Para sincronización instantánea directa, la Matriz y la App Satélite deben abrirse en la misma URL (<strong>Enlace Actual</strong> o ambos en el <strong>Enlace Compartido</strong>). Si están en redes/URLs distintas, conecta <strong>Google Drive (prevred3@gmail.com)</strong> para sincronizar reportes en la nube.
+            La nube <strong>Firestore</strong> sincroniza en tiempo real entre cualquier celular (4G) y la Matriz (PC) incluso entre enlaces distintos: solo presiona <strong>Conectar Nube</strong> con tu cuenta Google en ambos dispositivos (o usa <strong>Enlace Actual</strong> en la misma URL).
           </p>
         </div>
       </div>

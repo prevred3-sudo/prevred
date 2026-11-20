@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { AlertTriangle, CheckCircle2, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Cloud, X } from 'lucide-react';
+import { User } from 'firebase/auth';
 import { Navbar } from './components/Navbar';
 import { DashboardView } from './components/DashboardView';
 import { IncidentLiveStreamView } from './components/IncidentLiveStreamView';
@@ -19,8 +20,20 @@ import {
   deleteIncidentApi,
   updateEmergencyApi
 } from './services/api';
-import { getAccessToken } from './utils/firebaseAuth';
+import {
+  getAccessToken,
+  googleSignIn,
+  subscribeFirebaseAuthState
+} from './utils/firebaseAuth';
 import { fetchIncidentsFromDrive } from './services/googleDriveService';
+import {
+  saveIncidentToFirestore,
+  updateIncidentInFirestore,
+  deleteIncidentFromFirestore,
+  subscribeIncidentsFromFirestore,
+  saveEmergencyToFirestore,
+  subscribeEmergencyFromFirestore
+} from './services/firestoreSyncService';
 
 const SYNC_CHANNEL_NAME = 'prevriesgos-prl-sync';
 
@@ -69,6 +82,10 @@ export default function App() {
 
   // Sound preference
   const [soundEnabled, setSoundEnabled] = useState(true);
+
+  // Firebase Auth user (enables Cloud Firestore cross-device real-time sync)
+  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [isConnectingCloud, setIsConnectingCloud] = useState(false);
 
   // Core Data States with localStorage persistence
   const [incidents, setIncidents] = useState<Incident[]>(() => {
@@ -120,6 +137,65 @@ export default function App() {
     }
   }, []);
 
+  // 0. Firebase Auth + Real-Time Cloud Firestore Listeners (works across ais-pre <-> ais-dev & 4G <-> PC!)
+  useEffect(() => {
+    const unsubAuth = subscribeFirebaseAuthState((user) => {
+      setFirebaseUser(user);
+    });
+    return () => unsubAuth();
+  }, []);
+
+  useEffect(() => {
+    if (!firebaseUser || !firebaseUser.emailVerified) return;
+
+    const unsubIncidents = subscribeIncidentsFromFirestore(
+      (cloudIncidents) => {
+        if (cloudIncidents.length > 0) {
+          setIncidents((current) => {
+            const newItems = cloudIncidents.filter(
+              (c) => !current.some((cur) => cur.id === c.id)
+            );
+            if (newItems.length > 0) {
+              notifyNewIncoming(newItems[0]);
+            }
+            return mergeUniqueIncidents(cloudIncidents, current);
+          });
+          // Also keep local server synced when online
+          syncBatchIncidentsApi(cloudIncidents).catch(() => {});
+        }
+      },
+      (err) => {
+        console.warn('[Firestore Sync Error]:', err.message);
+      }
+    );
+
+    const unsubEmergency = subscribeEmergencyFromFirestore((cloudEmergency) => {
+      if (cloudEmergency?.active) {
+        setActiveEmergency(cloudEmergency);
+        safetyAudio.playEmergencySiren();
+      } else if (cloudEmergency && !cloudEmergency.active) {
+        setActiveEmergency(null);
+      }
+    });
+
+    return () => {
+      unsubIncidents();
+      unsubEmergency();
+    };
+  }, [firebaseUser, notifyNewIncoming]);
+
+  const handleConnectCloudSync = async () => {
+    setIsConnectingCloud(true);
+    try {
+      await googleSignIn();
+    } catch (err) {
+      console.warn('No se pudo conectar la nube:', err);
+      setShowDriveModal(true);
+    } finally {
+      setIsConnectingCloud(false);
+    }
+  };
+
   // 1. Cross-tab BroadcastChannel listener (instant local multi-tab sync)
   useEffect(() => {
     if (typeof window === 'undefined' || !('BroadcastChannel' in window)) return;
@@ -169,7 +245,7 @@ export default function App() {
                 ? msg.payload.incidents
                 : [];
               if (serverIncidents.length > 0) {
-                setIncidents(serverIncidents);
+                setIncidents((prev) => mergeUniqueIncidents(serverIncidents, prev));
               }
               if (msg.payload.emergency?.active) {
                 setActiveEmergency(msg.payload.emergency);
@@ -179,7 +255,7 @@ export default function App() {
               notifyNewIncoming(created);
               setIncidents((prev) => mergeUniqueIncidents([created], prev));
             } else if (msg.type === 'incidents:synced' && Array.isArray(msg.payload)) {
-              setIncidents(msg.payload);
+              setIncidents((prev) => mergeUniqueIncidents(msg.payload, prev));
             } else if (msg.type === 'incident:updated' && msg.payload?.id) {
               setIncidents((prev) =>
                 prev.map((i) => (i.id === msg.payload.id ? msg.payload : i))
@@ -236,11 +312,8 @@ export default function App() {
               notifyNewIncoming(newItems[0]);
             }
           }
-          return res.data;
+          return mergeUniqueIncidents(res.data, current);
         });
-      } else if (!isInitial) {
-        // If server was genuinely emptied and current has items that were deleted remotely, keep in sync
-        setIncidents((current) => (current.length === 0 ? current : res.data));
       }
     }
 
@@ -263,13 +336,15 @@ export default function App() {
     try {
       const syncedList = await syncBatchIncidentsApi(newItems);
       if (syncedList.length > 0) {
-        setIncidents(syncedList);
+        setIncidents((prev) => mergeUniqueIncidents(syncedList, prev));
       } else {
         setIncidents((prev) => mergeUniqueIncidents(newItems, prev));
       }
     } catch {
       setIncidents((prev) => mergeUniqueIncidents(newItems, prev));
     }
+
+    Promise.allSettled(newItems.map((inc) => saveIncidentToFirestore(inc))).catch(() => {});
 
     notifyNewIncoming(newItems[0]);
     return newItems.length;
@@ -322,11 +397,27 @@ export default function App() {
       setIncidents((prev) => mergeUniqueIncidents([newIncident], prev));
       setMySatelliteIncidents((prev) => mergeUniqueIncidents([newIncident], prev));
       postToBroadcast('incident:created', newIncident);
+      saveIncidentToFirestore(newIncident).catch((e) => console.warn('[Firestore sync]:', e));
       return newIncident;
     }
 
-    // Transmit to shared Express server FIRST so we know with certainty whether Matrix received it
-    const saved = await createIncidentApi(newIncident);
+    // Write to both Cloud Firestore (cross-device!) and Express server (same-origin!)
+    let firestoreOk = false;
+    try {
+      firestoreOk = await saveIncidentToFirestore(newIncident);
+    } catch (fsErr) {
+      console.warn('[Firestore] Error al guardar reporte:', fsErr);
+    }
+
+    let saved = newIncident;
+    try {
+      saved = await createIncidentApi(newIncident);
+    } catch (apiErr) {
+      if (!firestoreOk) {
+        throw apiErr;
+      }
+    }
+
     setIncidents((prev) => mergeUniqueIncidents([saved], prev));
     setMySatelliteIncidents((prev) => mergeUniqueIncidents([saved], prev));
     safetyAudio.playIncidentAlert(saved.severity);
@@ -338,7 +429,10 @@ export default function App() {
     setIncidents((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
     postToBroadcast('incident:updated', updated);
     try {
-      await updateIncidentApi(updated);
+      await Promise.allSettled([
+        updateIncidentApi(updated),
+        updateIncidentInFirestore(updated)
+      ]);
     } catch (err) {
       console.warn('Fallo al actualizar incidente:', err);
     }
@@ -353,13 +447,16 @@ export default function App() {
     postToBroadcast('incident:deleted', { id });
 
     try {
-      await deleteIncidentApi(id);
+      await Promise.allSettled([
+        deleteIncidentApi(id),
+        deleteIncidentFromFirestore(id)
+      ]);
     } catch (err) {
       console.warn('Fallo al eliminar incidente en backend:', err);
     }
   };
 
-  // Trigger emergency notice from satellite field -> actually sends SOS state + critical incident to Matrix!
+  // Trigger emergency notice from satellite field -> transmits SOS state + critical incident to Cloud Firestore & Express!
   const handleTriggerFieldEmergency = async (location: string, message: string) => {
     safetyAudio.playEmergencySiren();
     const emergencyPayload: EmergencyState = {
@@ -375,7 +472,10 @@ export default function App() {
 
     setActiveEmergency(emergencyPayload);
     postToBroadcast('emergency:updated', emergencyPayload);
-    await updateEmergencyApi(emergencyPayload);
+    await Promise.allSettled([
+      updateEmergencyApi(emergencyPayload),
+      saveEmergencyToFirestore(emergencyPayload)
+    ]);
 
     const sosIncident: Incident = {
       id: `sos-${Date.now()}`,
@@ -418,10 +518,19 @@ export default function App() {
   };
 
   const handleDismissEmergency = async () => {
-    const cleared = { active: false };
+    const cleared: Partial<EmergencyState> = {
+      active: false,
+      type: 'Evacuación General',
+      location: activeEmergency?.location || 'Planta Principal',
+      triggeredAt: activeEmergency?.triggeredAt || new Date().toISOString(),
+      message: 'Emergencia atendida y cerrada por Matriz PRL'
+    };
     setActiveEmergency(null);
     postToBroadcast('emergency:updated', cleared);
-    await updateEmergencyApi(cleared);
+    await Promise.allSettled([
+      updateEmergencyApi(cleared),
+      saveEmergencyToFirestore(cleared)
+    ]);
   };
 
   // Real-time Simulation Helper
@@ -491,6 +600,9 @@ export default function App() {
           onTriggerEmergency={handleTriggerFieldEmergency}
           onDeleteIncident={handleDeleteIncident}
           onOpenDriveModal={() => setShowDriveModal(true)}
+          cloudUser={firebaseUser}
+          onConnectCloud={handleConnectCloudSync}
+          isConnectingCloud={isConnectingCloud}
         />
         <GoogleDriveSyncModal
           isOpen={showDriveModal}
@@ -517,16 +629,31 @@ export default function App() {
         openIncidentsCount={openIncidentsCount}
       />
 
-      {/* Mode Switcher floating strip at the top of content */}
+      {/* Mode Switcher & Cloud Sync Status Strip */}
       <div className="bg-slate-900/60 border-b border-slate-800/80 px-4 py-2">
-        <div className="max-w-7xl mx-auto flex items-center justify-between text-xs">
+        <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-2">
             <span className="font-mono text-slate-400">Modo Activo:</span>
             <span className="font-bold text-amber-400 flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-amber-400"></span>
               Aplicación Matriz (Centro de Comando & Supervisión PRL)
             </span>
-            <span className="text-slate-500 hidden sm:inline">· Supervisado por prevred3@gmail.com</span>
+            {firebaseUser ? (
+              <span className="text-[11px] bg-emerald-950/80 text-emerald-300 border border-emerald-700/60 px-2 py-0.5 rounded font-mono flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                Nube Firestore Activa ({firebaseUser.email})
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={handleConnectCloudSync}
+                disabled={isConnectingCloud}
+                className="text-[11px] bg-blue-600 hover:bg-blue-500 text-white font-semibold px-2.5 py-0.5 rounded flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <Cloud className="w-3 h-3" />
+                <span>{isConnectingCloud ? 'Conectando...' : 'Conectar Nube (Recibir Celulares)'}</span>
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
