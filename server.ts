@@ -88,19 +88,34 @@ const INITIAL_SEED_INCIDENTS = [
 
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'incidents_db.json');
+const DELETED_FILE = path.join(DATA_DIR, 'deleted_ids.json');
 
 // Ensure data folder exists
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+const deletedIncidentIds = new Set<string>();
+try {
+  if (fs.existsSync(DELETED_FILE)) {
+    const parsedDeleted = JSON.parse(fs.readFileSync(DELETED_FILE, 'utf-8'));
+    if (Array.isArray(parsedDeleted)) {
+      parsedDeleted.forEach((id) => typeof id === 'string' && deletedIncidentIds.add(id));
+    }
+  }
+} catch {
+  // Ignore corrupted deleted file
+}
+
 let inMemoryIncidents: any[] = [];
 try {
   if (fs.existsSync(DB_FILE)) {
     const parsed = JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
-    inMemoryIncidents = Array.isArray(parsed) ? parsed : [...INITIAL_SEED_INCIDENTS];
+    inMemoryIncidents = Array.isArray(parsed)
+      ? parsed.filter((i) => i && !deletedIncidentIds.has(i.id))
+      : [...INITIAL_SEED_INCIDENTS];
   } else {
-    inMemoryIncidents = [...INITIAL_SEED_INCIDENTS];
+    inMemoryIncidents = INITIAL_SEED_INCIDENTS.filter((i) => !deletedIncidentIds.has(i.id));
     fs.writeFileSync(DB_FILE, JSON.stringify(inMemoryIncidents, null, 2));
   }
 } catch {
@@ -121,6 +136,7 @@ let inMemoryEmergency = {
 function persistDb() {
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(inMemoryIncidents, null, 2));
+    fs.writeFileSync(DELETED_FILE, JSON.stringify(Array.from(deletedIncidentIds), null, 2));
   } catch (err) {
     console.error('Error saving DB to disk:', err);
   }
@@ -186,6 +202,10 @@ async function startServer() {
     }
 
     const incidentId = newInc.id || `inc-${Date.now()}`;
+    if (deletedIncidentIds.has(incidentId)) {
+      deletedIncidentIds.delete(incidentId);
+    }
+
     const existingIdx = inMemoryIncidents.findIndex((i) => i.id === incidentId);
     if (existingIdx !== -1) {
       return res.status(200).json({ success: true, data: inMemoryIncidents[existingIdx], deduplicated: true });
@@ -212,6 +232,7 @@ async function startServer() {
 
     for (const item of incomingList) {
       if (!item || !item.id || !item.title) continue;
+      if (deletedIncidentIds.has(item.id)) continue;
       if (!inMemoryIncidents.some((existing) => existing.id === item.id || (item.code && existing.code === item.code))) {
         inMemoryIncidents.unshift(item);
         addedCount++;
@@ -242,18 +263,19 @@ async function startServer() {
     res.json({ success: true, data: inMemoryIncidents[idx] });
   });
 
-  // 3b. Delete incident or finding
+  // 3b. Delete incident or finding (idempotent with tombstone persistence)
   app.delete('/api/incidents/:id', (req, res) => {
     const { id } = req.params;
     const existing = inMemoryIncidents.find((i) => i.id === id);
-    if (!existing) {
-      return res.status(404).json({ success: false, error: 'Incidente o hallazgo no encontrado' });
-    }
 
+    deletedIncidentIds.add(id);
     inMemoryIncidents = inMemoryIncidents.filter((i) => i.id !== id);
     persistDb();
     broadcastEvent('incident:deleted', { id });
-    console.log(`[PRL Realtime] Incidente/Hallazgo eliminado: ${id} (${existing.code} - ${existing.title})`);
+
+    if (existing) {
+      console.log(`[PRL Realtime] Incidente/Hallazgo eliminado: ${id} (${existing.code} - ${existing.title})`);
+    }
     res.json({ success: true, message: 'Incidente eliminado exitosamente', id });
   });
 

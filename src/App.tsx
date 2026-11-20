@@ -36,6 +36,28 @@ import {
 } from './services/firestoreSyncService';
 
 const SYNC_CHANNEL_NAME = 'prevriesgos-prl-sync';
+const DELETED_IDS_KEY = 'prev_deleted_ids';
+const DELETED_CODES_KEY = 'prev_deleted_codes';
+
+function loadStoredSet(key: string): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const raw = localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? new Set(parsed.filter((v) => typeof v === 'string')) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveStoredSet(key: string, set: Set<string>) {
+  try {
+    const trimmed = Array.from(set).slice(-500);
+    localStorage.setItem(key, JSON.stringify(trimmed));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
 
 function mergeUniqueIncidents(incoming: Incident[], current: Incident[]): Incident[] {
   const map = new Map<string, Incident>();
@@ -123,11 +145,36 @@ export default function App() {
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [isConnectingCloud, setIsConnectingCloud] = useState(false);
 
+  // Persistent tombstones for deleted incidents so polling/Drive/tabs never resurrect them
+  const deletedIdsRef = useRef<Set<string>>(loadStoredSet(DELETED_IDS_KEY));
+  const deletedCodesRef = useRef<Set<string>>(loadStoredSet(DELETED_CODES_KEY));
+
+  const isIncidentDeleted = useCallback((inc: { id?: string; code?: string } | null | undefined) => {
+    if (!inc) return false;
+    if (inc.id && deletedIdsRef.current.has(inc.id)) return true;
+    if (inc.code && deletedCodesRef.current.has(inc.code)) return true;
+    return false;
+  }, []);
+
+  const markIncidentDeleted = useCallback((id: string, code?: string) => {
+    if (id) {
+      deletedIdsRef.current.add(id);
+      saveStoredSet(DELETED_IDS_KEY, deletedIdsRef.current);
+    }
+    if (code) {
+      deletedCodesRef.current.add(code);
+      saveStoredSet(DELETED_CODES_KEY, deletedCodesRef.current);
+    }
+  }, []);
+
   // Core Data States with localStorage persistence
   const [incidents, setIncidents] = useState<Incident[]>(() => {
     try {
       const saved = localStorage.getItem('prev_incidents');
-      return saved ? JSON.parse(saved) : INITIAL_INCIDENTS;
+      const base: Incident[] = saved ? JSON.parse(saved) : INITIAL_INCIDENTS;
+      const dIds = loadStoredSet(DELETED_IDS_KEY);
+      const dCodes = loadStoredSet(DELETED_CODES_KEY);
+      return base.filter((i) => i && !dIds.has(i.id) && (!i.code || !dCodes.has(i.code)));
     } catch {
       return INITIAL_INCIDENTS;
     }
@@ -156,6 +203,7 @@ export default function App() {
   }, [incidents]);
 
   const notifyNewIncoming = useCallback((inc: Incident) => {
+    if (isIncidentDeleted(inc)) return;
     if (!knownIdsRef.current.has(inc.id)) {
       safetyAudio.playIncidentAlert(inc.severity);
       setIncomingBanner({ code: inc.code, title: inc.title });
@@ -163,7 +211,7 @@ export default function App() {
         setIncomingBanner((prev) => (prev?.code === inc.code ? null : prev));
       }, 6500);
     }
-  }, []);
+  }, [isIncidentDeleted]);
 
   const postToBroadcast = useCallback((type: string, payload: unknown) => {
     try {
@@ -184,9 +232,9 @@ export default function App() {
   useEffect(() => {
     if (!firebaseUser || !firebaseUser.emailVerified) return;
 
-    // Auto-flush any reports created on this phone prior to cloud login
+    // Auto-flush any reports created on this phone prior to cloud login (excluding deleted ones)
     const localFieldReports = incidents.filter(
-      (i) => i.id.startsWith('field-') || i.id.startsWith('sos-')
+      (i) => (i.id.startsWith('field-') || i.id.startsWith('sos-')) && !isIncidentDeleted(i)
     );
     if (localFieldReports.length > 0) {
       Promise.allSettled(
@@ -196,22 +244,45 @@ export default function App() {
 
     const unsubIncidents = subscribeIncidentsFromFirestore(
       (cloudIncidents) => {
-        if (cloudIncidents.length > 0) {
+        const activeCloud = cloudIncidents.filter((c) => !isIncidentDeleted(c));
+        const deletedStillInCloud = cloudIncidents.filter((c) => isIncidentDeleted(c));
+        if (deletedStillInCloud.length > 0) {
+          Promise.allSettled(
+            deletedStillInCloud.map((c) => deleteIncidentFromFirestore(c.id))
+          ).catch(() => {});
+        }
+
+        if (activeCloud.length > 0) {
           setIncidents((current) => {
-            const newItems = cloudIncidents.filter(
+            const newItems = activeCloud.filter(
               (c) => !current.some((cur) => cur.id === c.id)
             );
             if (newItems.length > 0) {
               notifyNewIncoming(newItems[0]);
             }
-            return mergeUniqueIncidents(cloudIncidents, current);
+            return mergeUniqueIncidents(activeCloud, current).filter(
+              (i) => !isIncidentDeleted(i)
+            );
           });
           // Also keep local server synced when online
-          syncBatchIncidentsApi(cloudIncidents).catch(() => {});
+          syncBatchIncidentsApi(activeCloud).catch(() => {});
         }
       },
       (err) => {
         console.warn('[Firestore Sync Error]:', err.message);
+      },
+      (removedIds) => {
+        if (removedIds.length === 0) return;
+        removedIds.forEach((rid) => {
+          markIncidentDeleted(rid);
+          deleteIncidentApi(rid).catch(() => {});
+        });
+        const removedSet = new Set(removedIds);
+        setIncidents((prev) => prev.filter((i) => !removedSet.has(i.id)));
+        setMySatelliteIncidents((prev) => prev.filter((i) => !removedSet.has(i.id)));
+        setSelectedIncidentForDossier((prev) =>
+          prev && removedSet.has(prev.id) ? null : prev
+        );
       }
     );
 
@@ -228,7 +299,7 @@ export default function App() {
       unsubIncidents();
       unsubEmergency();
     };
-  }, [firebaseUser, notifyNewIncoming]);
+  }, [firebaseUser, notifyNewIncoming, isIncidentDeleted, markIncidentDeleted]);
 
   const handleConnectCloudSync = async () => {
     setIsConnectingCloud(true);
@@ -253,12 +324,16 @@ export default function App() {
     channel.onmessage = (event) => {
       const { type, payload } = event.data || {};
       if (type === 'incident:created' && payload?.id) {
+        if (isIncidentDeleted(payload)) return;
         notifyNewIncoming(payload as Incident);
         setIncidents((prev) => mergeUniqueIncidents([payload as Incident], prev));
       } else if (type === 'incident:updated' && payload?.id) {
+        if (isIncidentDeleted(payload)) return;
         setIncidents((prev) => prev.map((i) => (i.id === payload.id ? payload : i)));
       } else if (type === 'incident:deleted' && payload?.id) {
+        markIncidentDeleted(payload.id, payload.code);
         setIncidents((prev) => prev.filter((i) => i.id !== payload.id));
+        setMySatelliteIncidents((prev) => prev.filter((i) => i.id !== payload.id));
       } else if (type === 'emergency:updated') {
         setActiveEmergency(payload);
         if (payload?.active) safetyAudio.playEmergencySiren();
@@ -269,7 +344,7 @@ export default function App() {
       channel.close();
       broadcastRef.current = null;
     };
-  }, [notifyNewIncoming]);
+  }, [notifyNewIncoming, isIncidentDeleted, markIncidentDeleted]);
 
   // 2. WebSocket real-time connection to /ws + auto-reconnect
   useEffect(() => {
@@ -290,7 +365,7 @@ export default function App() {
             const msg = JSON.parse(event.data);
             if (msg.type === 'init' && msg.payload) {
               const serverIncidents: Incident[] = Array.isArray(msg.payload.incidents)
-                ? msg.payload.incidents
+                ? msg.payload.incidents.filter((i: Incident) => !isIncidentDeleted(i))
                 : [];
               if (serverIncidents.length > 0) {
                 setIncidents((prev) => mergeUniqueIncidents(serverIncidents, prev));
@@ -300,16 +375,21 @@ export default function App() {
               }
             } else if (msg.type === 'incident:created' && msg.payload?.id) {
               const created = msg.payload as Incident;
+              if (isIncidentDeleted(created)) return;
               notifyNewIncoming(created);
               setIncidents((prev) => mergeUniqueIncidents([created], prev));
             } else if (msg.type === 'incidents:synced' && Array.isArray(msg.payload)) {
-              setIncidents((prev) => mergeUniqueIncidents(msg.payload, prev));
+              const filtered = (msg.payload as Incident[]).filter((i) => !isIncidentDeleted(i));
+              setIncidents((prev) => mergeUniqueIncidents(filtered, prev));
             } else if (msg.type === 'incident:updated' && msg.payload?.id) {
+              if (isIncidentDeleted(msg.payload)) return;
               setIncidents((prev) =>
                 prev.map((i) => (i.id === msg.payload.id ? msg.payload : i))
               );
             } else if (msg.type === 'incident:deleted' && msg.payload?.id) {
+              markIncidentDeleted(msg.payload.id, msg.payload.code);
               setIncidents((prev) => prev.filter((i) => i.id !== msg.payload.id));
+              setMySatelliteIncidents((prev) => prev.filter((i) => i.id !== msg.payload.id));
             } else if (msg.type === 'emergency:updated') {
               setActiveEmergency(msg.payload);
               if (msg.payload?.active) {
@@ -342,7 +422,7 @@ export default function App() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       ws?.close();
     };
-  }, [notifyNewIncoming]);
+  }, [notifyNewIncoming, isIncidentDeleted, markIncidentDeleted]);
 
   // 3. Initial server fetch + resilient 2.5s REST polling fallback
   useEffect(() => {
@@ -352,15 +432,21 @@ export default function App() {
       const res = await fetchIncidentsFromServer();
       if (!active || !res.ok) return;
 
-      if (res.data.length > 0) {
+      const deletedOnServer = res.data.filter((item) => isIncidentDeleted(item));
+      if (deletedOnServer.length > 0) {
+        Promise.allSettled(deletedOnServer.map((item) => deleteIncidentApi(item.id))).catch(() => {});
+      }
+
+      const validServerData = res.data.filter((item) => !isIncidentDeleted(item));
+      if (validServerData.length > 0) {
         setIncidents((current) => {
           if (!isInitial) {
-            const newItems = res.data.filter((item) => !current.some((c) => c.id === item.id));
+            const newItems = validServerData.filter((item) => !current.some((c) => c.id === item.id));
             if (newItems.length > 0) {
               notifyNewIncoming(newItems[0]);
             }
           }
-          return mergeUniqueIncidents(res.data, current);
+          return mergeUniqueIncidents(validServerData, current).filter((i) => !isIncidentDeleted(i));
         });
       }
     }
@@ -372,19 +458,27 @@ export default function App() {
       active = false;
       clearInterval(pollInterval);
     };
-  }, [notifyNewIncoming]);
+  }, [notifyNewIncoming, isIncidentDeleted]);
 
   // 4. Import helper for Google Drive -> Matrix synchronization
   const handleImportFromDrive = useCallback(async (driveIncidents: Incident[]): Promise<number> => {
     const newItems = driveIncidents.filter(
-      (d) => !knownIdsRef.current.has(d.id) && !incidents.some((c) => c.code === d.code)
+      (d) =>
+        !isIncidentDeleted(d) &&
+        !knownIdsRef.current.has(d.id) &&
+        !incidents.some((c) => c.code === d.code)
     );
     if (newItems.length === 0) return 0;
 
     try {
       const syncedList = await syncBatchIncidentsApi(newItems);
       if (syncedList.length > 0) {
-        setIncidents((prev) => mergeUniqueIncidents(syncedList, prev));
+        setIncidents((prev) =>
+          mergeUniqueIncidents(
+            syncedList.filter((i) => !isIncidentDeleted(i)),
+            prev
+          )
+        );
       } else {
         setIncidents((prev) => mergeUniqueIncidents(newItems, prev));
       }
@@ -396,7 +490,7 @@ export default function App() {
 
     notifyNewIncoming(newItems[0]);
     return newItems.length;
-  }, [incidents, notifyNewIncoming]);
+  }, [incidents, notifyNewIncoming, isIncidentDeleted]);
 
   // 5. Auto-sync incoming satellite reports from Google Drive when prevred3@gmail.com is connected in Matrix
   useEffect(() => {
@@ -487,12 +581,17 @@ export default function App() {
   };
 
   const handleDeleteIncident = async (id: string) => {
+    const target =
+      incidents.find((i) => i.id === id) ||
+      mySatelliteIncidents.find((i) => i.id === id);
+
+    markIncidentDeleted(id, target?.code);
     setIncidents((prev) => prev.filter((i) => i.id !== id));
     setMySatelliteIncidents((prev) => prev.filter((i) => i.id !== id));
     if (selectedIncidentForDossier?.id === id) {
       setSelectedIncidentForDossier(null);
     }
-    postToBroadcast('incident:deleted', { id });
+    postToBroadcast('incident:deleted', { id, code: target?.code });
 
     try {
       await Promise.allSettled([

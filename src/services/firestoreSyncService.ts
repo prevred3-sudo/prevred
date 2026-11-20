@@ -144,7 +144,8 @@ export async function deleteIncidentFromFirestore(id: string): Promise<boolean> 
 
 export function subscribeIncidentsFromFirestore(
   onUpdate: (incidents: Incident[]) => void,
-  onError?: (err: Error) => void
+  onError?: (err: Error) => void,
+  onRemoved?: (removedIds: string[]) => void
 ): () => void {
   const user = auth.currentUser;
   if (!user || !user.emailVerified) {
@@ -162,6 +163,16 @@ export function subscribeIncidentsFromFirestore(
   return onSnapshot(
     q,
     (snapshot) => {
+      if (onRemoved) {
+        const removedIds = snapshot
+          .docChanges()
+          .filter((change) => change.type === 'removed')
+          .map((change) => change.doc.id);
+        if (removedIds.length > 0) {
+          onRemoved(removedIds);
+        }
+      }
+
       const list: Incident[] = snapshot.docs
         .map((d) => {
           const data = d.data();

@@ -71,7 +71,8 @@ export const IncidentLiveStreamView: React.FC<IncidentLiveStreamViewProps> = ({
       setToastMsg(`¡Informe ${incident.code} alojado con éxito en Google Drive!`);
       setTimeout(() => setToastMsg(''), 4000);
     } catch (err: unknown) {
-      alert(`Error al guardar en Google Drive: ${(err as Error).message}`);
+      setToastMsg(`Error al guardar en Google Drive: ${(err as Error).message}`);
+      setTimeout(() => setToastMsg(''), 5000);
     } finally {
       setSavingId(null);
     }
@@ -87,7 +88,8 @@ export const IncidentLiveStreamView: React.FC<IncidentLiveStreamViewProps> = ({
       setTimeout(() => setToastMsg(''), 4000);
       setIncidentToDelete(null);
     } catch (err) {
-      alert('Error al eliminar el registro: ' + (err as Error).message);
+      setToastMsg('Error al eliminar el registro: ' + (err as Error).message);
+      setTimeout(() => setToastMsg(''), 5000);
     } finally {
       setIsDeleting(false);
     }
