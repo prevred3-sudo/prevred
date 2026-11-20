@@ -21,7 +21,9 @@ import {
   Cloud,
   Power,
   X,
-  Lock
+  Lock,
+  Mic,
+  Square
 } from 'lucide-react';
 import { Incident, IncidentType, SeverityLevel } from '../types';
 import { safetyAudio } from '../utils/audioAlert';
@@ -117,6 +119,9 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   const [activeTabHistory, setActiveTabHistory] = useState<'sent' | 'offline_queue'>('sent');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [driveConnectedEmail, setDriveConnectedEmail] = useState<string | null>(() => getCurrentAppUser()?.email || null);
+  const [isListening, setIsListening] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState('');
+  const [voiceError, setVoiceError] = useState('');
 
   // Daily EPP Pass states
   const [eppChecks, setEppChecks] = useState({
@@ -127,6 +132,11 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<{
+    stop: () => void;
+    abort: () => void;
+  } | null>(null);
+  const noteBaseRef = useRef<string>('');
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -134,6 +144,124 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
     }, 2000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    return () => {
+      try {
+        recognitionRef.current?.abort();
+      } catch {
+        // Ignore cleanup errors
+      }
+    };
+  }, []);
+
+  const stopVoiceDictation = () => {
+    try {
+      recognitionRef.current?.stop();
+    } catch {
+      // Ignore stop errors
+    }
+    setIsListening(false);
+    setInterimTranscript('');
+  };
+
+  const handleToggleVoiceDictation = () => {
+    setVoiceError('');
+    setValidationError('');
+
+    if (isListening) {
+      stopVoiceDictation();
+      return;
+    }
+
+    if (typeof window === 'undefined') return;
+    const win = window as unknown as {
+      SpeechRecognition?: new () => {
+        lang: string;
+        continuous: boolean;
+        interimResults: boolean;
+        onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal: boolean }> }) => void) | null;
+        onerror: ((e: { error?: string }) => void) | null;
+        onend: (() => void) | null;
+        start: () => void;
+        stop: () => void;
+        abort: () => void;
+      };
+      webkitSpeechRecognition?: new () => {
+        lang: string;
+        continuous: boolean;
+        interimResults: boolean;
+        onresult: ((e: { results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal: boolean }> }) => void) | null;
+        onerror: ((e: { error?: string }) => void) | null;
+        onend: (() => void) | null;
+        start: () => void;
+        stop: () => void;
+        abort: () => void;
+      };
+    };
+
+    const SpeechRecognitionCtor = win.SpeechRecognition || win.webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) {
+      setVoiceError('Este navegador no admite dictado directo. Usa el ícono de micrófono del teclado de tu teléfono o abre en Chrome/Safari.');
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognitionCtor();
+      recognition.lang = navigator.language?.startsWith('es') ? navigator.language : 'es-ES';
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      noteBaseRef.current = note.trim();
+
+      recognition.onresult = (event) => {
+        let finalSession = '';
+        let interimSession = '';
+        for (let i = 0; i < event.results.length; i++) {
+          const res = event.results[i];
+          const text = res?.[0]?.transcript || '';
+          if (res.isFinal) {
+            finalSession += `${text} `;
+          } else {
+            interimSession += `${text} `;
+          }
+        }
+        const cleanedFinal = finalSession.trim();
+        const combined = [noteBaseRef.current, cleanedFinal].filter(Boolean).join(' ');
+        setNote(combined);
+        setInterimTranscript(interimSession.trim());
+      };
+
+      recognition.onerror = (event) => {
+        const code = event?.error || '';
+        if (code === 'not-allowed' || code === 'service-not-allowed') {
+          setVoiceError('Permiso de micrófono denegado. Habilita el micrófono en tu navegador e intenta de nuevo.');
+        } else if (code === 'no-speech') {
+          setVoiceError('No se detectó voz. Acerca el micrófono y vuelve a pulsar para hablar.');
+        } else if (code === 'audio-capture') {
+          setVoiceError('No se encontró micrófono disponible en este dispositivo.');
+        } else if (code === 'network') {
+          setVoiceError('El dictado por voz requiere conexión de red en este navegador.');
+        } else if (code !== 'aborted') {
+          setVoiceError('No se pudo iniciar el dictado por voz. Intenta nuevamente.');
+        }
+        setIsListening(false);
+        setInterimTranscript('');
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+        setInterimTranscript('');
+        recognitionRef.current = null;
+      };
+
+      recognitionRef.current = recognition;
+      setIsListening(true);
+      recognition.start();
+    } catch {
+      setIsListening(false);
+      setVoiceError('No se pudo activar el micrófono en este dispositivo.');
+    }
+  };
 
   const handlePhotoCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -205,11 +333,14 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
 
   const handleSendReport = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isListening) {
+      stopVoiceDictation();
+    }
     setValidationError('');
     setDriveBackupNotice('');
 
     if (!note.trim() && !capturedPhoto) {
-      setValidationError('Por favor tome una foto o escriba una breve descripción del hallazgo antes de enviar.');
+      setValidationError('Por favor tome una foto, dicte por voz o escriba una breve descripción del hallazgo antes de enviar.');
       return;
     }
 
@@ -293,6 +424,8 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
 
     // Reset simple form
     setNote('');
+    noteBaseRef.current = '';
+    setInterimTranscript('');
     setCapturedPhoto(null);
     setGpsLocation('');
     if (fileInputRef.current) {
@@ -944,18 +1077,75 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
             )}
           </div>
 
-          {/* Note / Description */}
-          <div className="space-y-1.5">
-            <span className="text-xs font-bold text-slate-200 tracking-wide uppercase">
-              4. Breve Comentario / Nota
-            </span>
+          {/* Note / Description with Voice Dictation */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-bold text-slate-200 tracking-wide uppercase">
+                4. Breve Comentario / Nota
+              </span>
+              <button
+                type="button"
+                onClick={handleToggleVoiceDictation}
+                aria-label={isListening ? 'Detener dictado por voz' : 'Dictar reporte por voz con micrófono'}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 ${
+                  isListening
+                    ? 'bg-rose-600 hover:bg-rose-500 text-white animate-pulse shadow-md shadow-rose-950'
+                    : 'bg-amber-400/15 hover:bg-amber-400/25 text-amber-300 border border-amber-400/40'
+                }`}
+              >
+                {isListening ? (
+                  <>
+                    <Square className="w-3.5 h-3.5 fill-current" />
+                    <span>Detener Voz</span>
+                  </>
+                ) : (
+                  <>
+                    <Mic className="w-3.5 h-3.5" />
+                    <span>Dictar por Voz</span>
+                  </>
+                )}
+              </button>
+            </div>
             <textarea
-              rows={2}
-              placeholder="Ej: Cable pelado con chispas en la base del elevador 2, pasillo bloqueado..."
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-amber-400 resize-none"
+              rows={3}
+              placeholder="Pulsa 'Dictar por Voz' para hablar sin escribir, o escribe aquí..."
+              value={isListening && interimTranscript ? (note ? `${note} ${interimTranscript}` : interimTranscript) : note}
+              onChange={(e) => {
+                if (isListening) stopVoiceDictation();
+                setNote(e.target.value);
+              }}
+              className={`w-full bg-slate-950 border rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none resize-none transition-colors ${
+                isListening
+                  ? 'border-rose-500 ring-1 ring-rose-500/40'
+                  : 'border-slate-700 focus:border-amber-400'
+              }`}
             />
+            {isListening && (
+              <div className="flex items-center gap-2 text-[11px] text-rose-300 bg-rose-950/50 border border-rose-700/50 rounded-lg px-2.5 py-1.5">
+                <span className="w-2 h-2 rounded-full bg-rose-400 animate-ping shrink-0" />
+                <span>Escuchando micrófono... Habla claro y pulsa <strong>Detener Voz</strong> al terminar.</span>
+              </div>
+            )}
+            {!isListening && note.trim().length > 0 && (
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNote('');
+                    noteBaseRef.current = '';
+                  }}
+                  className="text-[11px] text-slate-400 hover:text-rose-300 flex items-center gap-1 cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Borrar texto</span>
+                </button>
+              </div>
+            )}
+            {voiceError && (
+              <div className="text-[11px] text-amber-200 bg-amber-950/60 border border-amber-700/50 rounded-lg px-2.5 py-1.5">
+                {voiceError}
+              </div>
+            )}
           </div>
 
           {/* Big Action Submit Button */}
