@@ -157,6 +157,110 @@
       },
       "required": ["active", "type", "location", "triggeredAt", "message", "triggeredByUid", "updatedAt"]
     },
+    "SafetyTalk": {
+      "title": "SafetyTalk",
+      "description": "Signed safety briefing / talk record submitted from Satellite field app to Matrix",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "timestamp": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 64
+        },
+        "dateFormatted": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "topic": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "talkType": {
+          "type": "string",
+          "enum": [
+            "Charla 5 Minutos",
+            "Inducción Terreno",
+            "ART / AST Previo",
+            "Capacitación Específica"
+          ]
+        },
+        "location": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "instructorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "attendeesCount": {
+          "type": "integer"
+        },
+        "attendeeNames": {
+          "type": "array",
+          "description": "List of participating workers (bounded to max 50)"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 1500
+        },
+        "signatureDataUrl": {
+          "type": "string",
+          "maxLength": 300000
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Enviada", "Validada Matriz"]
+        },
+        "reporterUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "code",
+        "timestamp",
+        "dateFormatted",
+        "topic",
+        "talkType",
+        "location",
+        "instructorName",
+        "attendeesCount",
+        "attendeeNames",
+        "notes",
+        "status",
+        "reporterUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
     "AdminUser": {
       "title": "AdminUser",
       "description": "Registered PRL administrator record",
@@ -172,12 +276,113 @@
         }
       },
       "required": ["role", "createdAt"]
+    },
+    "WorkerNotification": {
+      "title": "WorkerNotification",
+      "description": "Real-time safety dispatch or instruction sent from Matrix to Satellite field workers",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 40
+        },
+        "timestamp": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 64
+        },
+        "timeFormatted": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1500
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["Informativa", "Advertencia", "Urgente"]
+        },
+        "targetZone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "targetWorker": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "senderName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "senderUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "acknowledgedBy": {
+          "type": "array",
+          "description": "Worker names that confirmed receipt (bounded to max 50)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "code",
+        "timestamp",
+        "timeFormatted",
+        "title",
+        "message",
+        "priority",
+        "targetZone",
+        "targetWorker",
+        "senderName",
+        "senderUid",
+        "active",
+        "acknowledgedBy",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
     "/incidents/{incidentId}": {
       "schema": { "$ref": "#/entities/Incident" },
       "description": "Real-time safety incidents and field reports synchronized between Satellite and Matrix"
+    },
+    "/safety_talks/{talkId}": {
+      "schema": { "$ref": "#/entities/SafetyTalk" },
+      "description": "Signed safety talks and field briefings sent from Satellite to Matrix"
+    },
+    "/worker_notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/WorkerNotification" },
+      "description": "Real-time safety notices and instructions sent from Matrix to Satellite workers"
     },
     "/emergencies/{emergencyId}": {
       "schema": { "$ref": "#/entities/EmergencyAlert" },

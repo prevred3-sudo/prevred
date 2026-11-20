@@ -23,9 +23,19 @@ import {
   X,
   Lock,
   Mic,
-  Square
+  Square,
+  Volume2,
+  SlidersHorizontal,
+  ClipboardCheck,
+  PenTool,
+  Users,
+  Plus,
+  Bell,
+  Siren,
+  Info,
+  CheckCheck
 } from 'lucide-react';
-import { Incident, IncidentType, SeverityLevel } from '../types';
+import { Incident, IncidentType, SeverityLevel, SafetyTalk, SafetyTalkType, WorkerNotification } from '../types';
 import { safetyAudio } from '../utils/audioAlert';
 import { usePWAInstall } from '../utils/usePWAInstall';
 import { useOfflineSyncQueue } from '../utils/useOfflineSyncQueue';
@@ -48,6 +58,10 @@ interface SatelliteFieldAppProps {
   isConnectingCloud?: boolean;
   cloudError?: string;
   onClearCloudError?: () => void;
+  onSubmitSafetyTalk?: (talk: SafetyTalk) => Promise<any> | void;
+  myRecentTalks?: SafetyTalk[];
+  workerNotifications?: WorkerNotification[];
+  onAcknowledgeNotification?: (notificationId: string, workerName: string) => Promise<any> | void;
 }
 
 const FIELD_ZONES = [
@@ -57,6 +71,14 @@ const FIELD_ZONES = [
   'Sector 4 - Taller de Mantenimiento',
   'Sector 5 - Trabajos en Altura / Techumbre',
   'Sector 6 - Área de Soldadura'
+];
+
+const QUICK_TALK_TOPICS = [
+  'Uso correcto de EPP',
+  'Trabajo en Altura',
+  'Bloqueo y Etiquetado LOTO',
+  'Riesgo Eléctrico',
+  'Orden y Aseo en Sector'
 ];
 
 export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
@@ -72,7 +94,11 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   onConnectCloud,
   isConnectingCloud,
   cloudError,
-  onClearCloudError
+  onClearCloudError,
+  onSubmitSafetyTalk,
+  myRecentTalks = [],
+  workerNotifications = [],
+  onAcknowledgeNotification
 }) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
 
@@ -122,6 +148,44 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   const [isListening, setIsListening] = useState(false);
   const [interimTranscript, setInterimTranscript] = useState('');
   const [voiceError, setVoiceError] = useState('');
+  const [sirenDurationSeconds, setSirenDurationSeconds] = useState<number>(() =>
+    safetyAudio.getSirenDurationSeconds()
+  );
+  const [showSirenConfig, setShowSirenConfig] = useState(false);
+  const [isSirenPlaying, setIsSirenPlaying] = useState(false);
+
+  // Active item inside Satellite: 'incident' (Reportar Hallazgo) vs 'talk' (Charla Firmada) vs 'notifications' (Avisos Matriz)
+  const [activeFieldSection, setActiveFieldSection] = useState<'incident' | 'talk' | 'notifications'>('incident');
+
+  // Local read/acknowledged notification IDs + live popup state
+  const [localAckNotifIds, setLocalAckNotifIds] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('prev_sat_ack_notifications');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
+  const [dismissedPopupId, setDismissedPopupId] = useState<string | null>(null);
+  const [notifPermission, setNotifPermission] = useState<string>(() =>
+    typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : 'unsupported'
+  );
+  const seenNotifIdsRef = useRef<Set<string>>(new Set(workerNotifications.map((n) => n.id)));
+  const isFirstNotifLoadRef = useRef(true);
+
+  // Signed Safety Talk (Charla Firmada) Form State
+  const [talkTopic, setTalkTopic] = useState('');
+  const [talkType, setTalkType] = useState<SafetyTalkType>('Charla 5 Minutos');
+  const [talkNotes, setTalkNotes] = useState('');
+  const [attendeeInput, setAttendeeInput] = useState('');
+  const [attendeeNames, setAttendeeNames] = useState<string[]>([]);
+  const [attendeesCount, setAttendeesCount] = useState<number>(1);
+  const [talkPhoto, setTalkPhoto] = useState<string | null>(null);
+  const [hasSignature, setHasSignature] = useState(false);
+  const [isDrawingSignature, setIsDrawingSignature] = useState(false);
+  const [isSubmittingTalk, setIsSubmittingTalk] = useState(false);
+  const [talkSuccessCode, setTalkSuccessCode] = useState('');
 
   // Daily EPP Pass states
   const [eppChecks, setEppChecks] = useState({
@@ -132,11 +196,18 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
   });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const talkPhotoInputRef = useRef<HTMLInputElement>(null);
+  const signatureCanvasRef = useRef<HTMLCanvasElement>(null);
   const recognitionRef = useRef<{
     stop: () => void;
     abort: () => void;
   } | null>(null);
   const noteBaseRef = useRef<string>('');
+
+  useEffect(() => {
+    const unsubSiren = safetyAudio.subscribeSirenState(setIsSirenPlaying);
+    return () => unsubSiren();
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -154,6 +225,95 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
       }
     };
   }, []);
+
+  // Detect new notifications arriving from Matrix -> vibrate, chime, and trigger browser notification
+  useEffect(() => {
+    if (isFirstNotifLoadRef.current) {
+      isFirstNotifLoadRef.current = false;
+      seenNotifIdsRef.current = new Set(workerNotifications.map((n) => n.id));
+      return;
+    }
+
+    const newlyArrived = workerNotifications.filter((n) => !seenNotifIdsRef.current.has(n.id));
+    if (newlyArrived.length > 0) {
+      const latest = newlyArrived[0];
+      setDismissedPopupId(null);
+      safetyAudio.playIncidentAlert(
+        latest.priority === 'Urgente'
+          ? 'Crítico'
+          : latest.priority === 'Advertencia'
+          ? 'Grave'
+          : 'Moderado'
+      );
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try {
+          navigator.vibrate(latest.priority === 'Urgente' ? [250, 100, 250, 100, 250] : [180, 80, 180]);
+        } catch {
+          // Ignore vibration errors
+        }
+      }
+      if (
+        typeof window !== 'undefined' &&
+        'Notification' in window &&
+        Notification.permission === 'granted'
+      ) {
+        try {
+          new Notification(`[${latest.priority.toUpperCase()}] ${latest.title}`, {
+            body: `${latest.message} (${latest.targetZone})`,
+            tag: latest.id
+          });
+        } catch {
+          // Ignore browser Notification constructor errors on restricted mobile webviews
+        }
+      }
+    }
+    seenNotifIdsRef.current = new Set(workerNotifications.map((n) => n.id));
+  }, [workerNotifications]);
+
+  const isNotifAcknowledgedHere = (notif: WorkerNotification) => {
+    const cleanWorker = workerName.trim() || 'Operador Terreno';
+    return (
+      localAckNotifIds.includes(notif.id) ||
+      (Array.isArray(notif.acknowledgedBy) && notif.acknowledgedBy.includes(cleanWorker))
+    );
+  };
+
+  const unreadNotifications = workerNotifications.filter(
+    (n) => n.active !== false && !isNotifAcknowledgedHere(n)
+  );
+  const latestUnreadNotification =
+    unreadNotifications.find((n) => n.id !== dismissedPopupId) || null;
+
+  const handleAcknowledgeNotif = async (notifId: string) => {
+    const cleanWorker = workerName.trim() || 'Operador Terreno';
+    setLocalAckNotifIds((prev) => {
+      if (prev.includes(notifId)) return prev;
+      const next = [...prev, notifId].slice(-200);
+      try {
+        localStorage.setItem('prev_sat_ack_notifications', JSON.stringify(next));
+      } catch {
+        // Ignore storage error
+      }
+      return next;
+    });
+    if (onAcknowledgeNotification) {
+      try {
+        await onAcknowledgeNotification(notifId, cleanWorker);
+      } catch {
+        // Local acknowledgement still persists
+      }
+    }
+  };
+
+  const handleEnableBrowserAlerts = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    try {
+      const result = await Notification.requestPermission();
+      setNotifPermission(result);
+    } catch {
+      // Ignore permission request error
+    }
+  };
 
   const stopVoiceDictation = () => {
     try {
@@ -433,8 +593,199 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
     }
   };
 
+  // --- Signed Safety Talk (Charla Firmada) Signature & Handlers ---
+  const initSignatureCanvas = () => {
+    const canvas = signatureCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#0F172A';
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+  };
+
+  useEffect(() => {
+    if (activeFieldSection === 'talk' && !hasSignature) {
+      initSignatureCanvas();
+    }
+  }, [activeFieldSection, hasSignature]);
+
+  const getCanvasPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = signatureCanvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY
+    };
+  };
+
+  const handleSignaturePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = signatureCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    if (!hasSignature) {
+      initSignatureCanvas();
+    }
+    canvas.setPointerCapture(e.pointerId);
+    const { x, y } = getCanvasPoint(e);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    setIsDrawingSignature(true);
+    setHasSignature(true);
+    setValidationError('');
+  };
+
+  const handleSignaturePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!isDrawingSignature) return;
+    const canvas = signatureCanvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!ctx) return;
+    const { x, y } = getCanvasPoint(e);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  };
+
+  const handleSignaturePointerUp = () => {
+    setIsDrawingSignature(false);
+  };
+
+  const handleClearSignature = () => {
+    setHasSignature(false);
+    initSignatureCanvas();
+  };
+
+  const handleTalkPhotoCapture = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setValidationError('');
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result !== 'string') return;
+      const raw = reader.result;
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          const MAX_DIM = 960;
+          let width = img.width;
+          let height = img.height;
+          if (width > height && width > MAX_DIM) {
+            height = Math.round((height * MAX_DIM) / width);
+            width = MAX_DIM;
+          } else if (height > MAX_DIM) {
+            width = Math.round((width * MAX_DIM) / height);
+            height = MAX_DIM;
+          }
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height);
+            let compressed = canvas.toDataURL('image/jpeg', 0.72);
+            if (compressed.length > 450000) {
+              compressed = canvas.toDataURL('image/jpeg', 0.5);
+            }
+            setTalkPhoto(compressed);
+          } else {
+            setTalkPhoto(raw);
+          }
+        } catch {
+          setTalkPhoto(raw);
+        }
+      };
+      img.onerror = () => setTalkPhoto(raw);
+      img.src = raw;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleAddAttendee = () => {
+    const clean = attendeeInput.trim();
+    if (!clean) return;
+    const nextList = [...attendeeNames, clean].slice(0, 50);
+    setAttendeeNames(nextList);
+    setAttendeesCount((prev) => Math.max(prev, nextList.length));
+    setAttendeeInput('');
+  };
+
+  const handleSendSafetyTalk = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setValidationError('');
+    setTalkSuccessCode('');
+
+    if (!talkTopic.trim()) {
+      setValidationError('Indica el tema de la charla antes de enviar.');
+      return;
+    }
+
+    if (!hasSignature && !talkPhoto) {
+      setValidationError('Agrega una firma en pantalla o adjunta una foto de la planilla firmada.');
+      return;
+    }
+
+    let signatureDataUrl: string | undefined;
+    if (hasSignature && signatureCanvasRef.current) {
+      signatureDataUrl = signatureCanvasRef.current.toDataURL('image/png');
+    }
+
+    setIsSubmittingTalk(true);
+    const code = `CHARLA-${Math.floor(1000 + Math.random() * 9000)}`;
+    const now = new Date();
+    const newTalk: SafetyTalk = {
+      id: `talk-${Date.now()}`,
+      code,
+      timestamp: now.toISOString(),
+      dateFormatted: now.toLocaleString('es-ES', {
+        day: '2-digit',
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      }),
+      topic: talkTopic.trim(),
+      talkType,
+      location: gpsLocation ? `${zone} · ${gpsLocation}` : zone,
+      instructorName: workerName.trim() || 'Operador Terreno',
+      attendeesCount: Math.max(1, attendeesCount, attendeeNames.length),
+      attendeeNames,
+      notes: talkNotes.trim(),
+      signatureDataUrl,
+      photoUrl: talkPhoto || undefined,
+      status: 'Enviada'
+    };
+
+    try {
+      if (onSubmitSafetyTalk) {
+        await onSubmitSafetyTalk(newTalk);
+      }
+      safetyAudio.playIncidentAlert('Leve');
+      setTalkSuccessCode(code);
+      setTimeout(() => setTalkSuccessCode(''), 6000);
+      setTalkTopic('');
+      setTalkNotes('');
+      setAttendeeNames([]);
+      setAttendeeInput('');
+      setAttendeesCount(1);
+      setTalkPhoto(null);
+      if (talkPhotoInputRef.current) {
+        talkPhotoInputRef.current.value = '';
+      }
+      handleClearSignature();
+    } catch {
+      setValidationError('No se pudo enviar la charla firmada. Revisa tu conexión e intenta de nuevo.');
+    } finally {
+      setIsSubmittingTalk(false);
+    }
+  };
+
   const handleTriggerSOS = () => {
-    safetyAudio.playEmergencySiren();
+    safetyAudio.playEmergencySiren(sirenDurationSeconds);
     onTriggerEmergency(zone, `¡Alerta de pánico emitida por ${workerName} desde la Satélite Terreno!`);
     setShowEmergencyConfirm(false);
     setSosSentToast(true);
@@ -854,23 +1205,128 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
           </div>
         )}
 
-        {/* SOS Panic Button Strip */}
-        <div className="bg-gradient-to-r from-rose-950/60 to-slate-900 border border-rose-900/50 rounded-xl p-3 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-full bg-rose-600 flex items-center justify-center text-white shrink-0 shadow-lg shadow-rose-900">
-              <Flame className="w-4 h-4" />
+        {/* SOS Panic Button Strip (div:nth-of-type(2)) with Configurable Siren Duration */}
+        <div className="bg-gradient-to-r from-rose-950/60 to-slate-900 border border-rose-900/50 rounded-xl p-3 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-full bg-rose-600 flex items-center justify-center text-white shrink-0 shadow-lg shadow-rose-900">
+                <Flame className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-rose-200">¿Emergencia Inmediata?</div>
+                <div className="text-[11px] text-rose-400">
+                  Pánico / Fuego · Sirena: <span className="font-mono font-bold text-rose-200">{sirenDurationSeconds}s</span>
+                </div>
+              </div>
             </div>
-            <div>
-              <div className="text-xs font-bold text-rose-200">¿Emergencia Inmediata?</div>
-              <div className="text-[11px] text-rose-400">Pánico / Fuego / Derrame grave</div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {isSirenPlaying ? (
+                <button
+                  type="button"
+                  onClick={() => safetyAudio.stopEmergencySiren()}
+                  className="px-2.5 py-1.5 bg-slate-950 hover:bg-slate-800 border border-rose-500/70 text-rose-200 text-[11px] font-bold rounded-lg flex items-center gap-1 cursor-pointer animate-pulse"
+                  title="Silenciar sirena activa"
+                >
+                  <Square className="w-3 h-3 fill-current text-rose-400" />
+                  <span>Silenciar</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setShowSirenConfig((prev) => !prev)}
+                  className={`p-1.5 rounded-lg border text-xs flex items-center gap-1 cursor-pointer transition-colors ${
+                    showSirenConfig
+                      ? 'bg-rose-900/60 border-rose-400 text-white'
+                      : 'bg-slate-950/80 border-rose-900/60 text-rose-300 hover:border-rose-600'
+                  }`}
+                  title="Configurar duración de sirena SOS"
+                  aria-label="Configurar duración de sirena SOS"
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5" />
+                  <span className="text-[10px] font-mono font-bold">{sirenDurationSeconds}s</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowEmergencyConfirm(true)}
+                className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-lg shadow-md transition-all cursor-pointer whitespace-nowrap active:scale-95"
+              >
+                BOTÓN SOS
+              </button>
             </div>
           </div>
-          <button
-            onClick={() => setShowEmergencyConfirm(true)}
-            className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-lg shadow-md transition-all cursor-pointer whitespace-nowrap active:scale-95"
-          >
-            BOTÓN SOS
-          </button>
+
+          {showSirenConfig && (
+            <div className="bg-slate-950/85 border border-rose-900/60 rounded-lg p-2.5 space-y-2 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-rose-200 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Tiempo de Sirena SOS: {sirenDurationSeconds} segundos</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowSirenConfig(false)}
+                  className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+                >
+                  Cerrar
+                </button>
+              </div>
+
+              <div className="grid grid-cols-6 gap-1">
+                {[3, 5, 10, 15, 30, 60].map((sec) => (
+                  <button
+                    key={sec}
+                    type="button"
+                    onClick={() => {
+                      const saved = safetyAudio.setSirenDurationSeconds(sec);
+                      setSirenDurationSeconds(saved);
+                    }}
+                    className={`py-1 rounded text-[11px] font-mono font-bold cursor-pointer transition-colors ${
+                      sirenDurationSeconds === sec
+                        ? 'bg-rose-600 text-white'
+                        : 'bg-slate-900 text-slate-300 border border-slate-800 hover:border-rose-700'
+                    }`}
+                  >
+                    {sec}s
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2 pt-0.5">
+                <input
+                  type="range"
+                  min={1}
+                  max={60}
+                  step={1}
+                  value={sirenDurationSeconds}
+                  onChange={(e) => {
+                    const saved = safetyAudio.setSirenDurationSeconds(Number(e.target.value));
+                    setSirenDurationSeconds(saved);
+                  }}
+                  aria-label="Segundos de sirena SOS"
+                  className="flex-1 accent-rose-500 cursor-pointer"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (isSirenPlaying) {
+                      safetyAudio.stopEmergencySiren();
+                    } else {
+                      safetyAudio.playEmergencySiren(sirenDurationSeconds);
+                    }
+                  }}
+                  className={`px-2.5 py-1 rounded text-[11px] font-semibold flex items-center gap-1 cursor-pointer shrink-0 ${
+                    isSirenPlaying
+                      ? 'bg-slate-800 text-rose-300 border border-rose-600'
+                      : 'bg-rose-950 hover:bg-rose-900 text-rose-200 border border-rose-700/70'
+                  }`}
+                >
+                  <Volume2 className="w-3.5 h-3.5" />
+                  <span>{isSirenPlaying ? 'Detener' : 'Probar'}</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Validation Error Banner (replaces blocked window.alert) */}
@@ -945,7 +1401,143 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
           </div>
         )}
 
-        {/* MAIN CAPTURE FORM */}
+        {/* Signed Talk Sent Toast */}
+        {talkSuccessCode && (
+          <div className="bg-emerald-950/90 border border-emerald-500/40 rounded-xl p-4 text-emerald-200 flex items-start gap-3 shadow-xl">
+            <ClipboardCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="text-xs font-bold text-emerald-100">
+                ¡Charla Firmada Enviada a la Matriz!
+              </div>
+              <div className="text-xs text-emerald-300 mt-0.5">
+                Registrada bajo código <span className="font-mono font-bold">{talkSuccessCode}</span>.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Live Incoming Matrix Notification Alert Card */}
+        {latestUnreadNotification && activeFieldSection !== 'notifications' && (
+          <div
+            className={`rounded-2xl p-4 border shadow-xl space-y-2.5 ${
+              latestUnreadNotification.priority === 'Urgente'
+                ? 'bg-rose-950/95 border-rose-500 text-rose-100'
+                : latestUnreadNotification.priority === 'Advertencia'
+                ? 'bg-amber-950/90 border-amber-500/70 text-amber-100'
+                : 'bg-blue-950/90 border-blue-500/60 text-blue-100'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2">
+                {latestUnreadNotification.priority === 'Urgente' ? (
+                  <Siren className="w-5 h-5 text-rose-300 shrink-0 animate-pulse" />
+                ) : (
+                  <Bell className="w-5 h-5 text-amber-300 shrink-0" />
+                )}
+                <div>
+                  <div className="text-[11px] font-mono uppercase font-bold tracking-wider">
+                    Aviso desde Matriz · {latestUnreadNotification.priority}
+                  </div>
+                  <div className="text-sm font-bold leading-snug">
+                    {latestUnreadNotification.title}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDismissedPopupId(latestUnreadNotification.id)}
+                className="text-slate-300 hover:text-white cursor-pointer"
+                aria-label="Ocultar aviso temporalmente"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs leading-relaxed opacity-95">
+              {latestUnreadNotification.message}
+            </p>
+
+            <div className="flex items-center justify-between gap-2 pt-1 text-[11px]">
+              <span className="opacity-80">
+                Sector: <strong>{latestUnreadNotification.targetZone}</strong>
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setActiveFieldSection('notifications')}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-900/70 hover:bg-slate-900 text-slate-200 font-semibold cursor-pointer"
+                >
+                  Ver Avisos ({unreadNotifications.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleAcknowledgeNotif(latestUnreadNotification.id)}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <CheckCheck className="w-3.5 h-3.5" />
+                  <span>Entendido</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Satellite Action Switcher: Reportar Hallazgo vs Charla Firmada vs Avisos Matriz */}
+        <div className="grid grid-cols-3 gap-1.5 bg-slate-900 border border-slate-800 rounded-2xl p-1.5 shadow-md">
+          <button
+            type="button"
+            onClick={() => {
+              setActiveFieldSection('incident');
+              setValidationError('');
+            }}
+            className={`py-2.5 px-2 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
+              activeFieldSection === 'incident'
+                ? 'bg-amber-400 text-slate-950 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span>Hallazgo</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActiveFieldSection('talk');
+              setValidationError('');
+            }}
+            className={`py-2.5 px-2 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${
+              activeFieldSection === 'talk'
+                ? 'bg-emerald-400 text-slate-950 shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <ClipboardCheck className="w-3.5 h-3.5 shrink-0" />
+            <span>Charla</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setActiveFieldSection('notifications');
+              setValidationError('');
+            }}
+            className={`py-2.5 px-2 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1 transition-all cursor-pointer relative ${
+              activeFieldSection === 'notifications'
+                ? 'bg-blue-500 text-white shadow-sm'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Bell className="w-3.5 h-3.5 shrink-0" />
+            <span>Avisos</span>
+            {unreadNotifications.length > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold bg-rose-600 text-white">
+                {unreadNotifications.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* MAIN CAPTURE FORM (Hallazgo) OR SIGNED TALK FORM OR MATRIX NOTIFICATIONS */}
+        {activeFieldSection === 'incident' ? (
         <form onSubmit={handleSendReport} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold text-slate-200 tracking-wide uppercase">
@@ -1164,6 +1756,400 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
             </span>
           </button>
         </form>
+        ) : activeFieldSection === 'talk' ? (
+        <form onSubmit={handleSendSafetyTalk} className="bg-slate-900 border border-emerald-800/50 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+            <div className="flex items-center gap-2">
+              <ClipboardCheck className="w-5 h-5 text-emerald-400" />
+              <div>
+                <h2 className="text-xs font-bold text-slate-100 uppercase tracking-wide">
+                  Registro de Charla Firmada
+                </h2>
+                <p className="text-[11px] text-slate-400">
+                  Envía constancia firmada en directo a la Matriz PRL
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* 1. Topic */}
+          <div className="space-y-2">
+            <span className="text-xs font-bold text-slate-200 tracking-wide uppercase">
+              1. Tema de la Charla
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {QUICK_TALK_TOPICS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setTalkTopic(preset)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors cursor-pointer ${
+                    talkTopic === preset
+                      ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                  }`}
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+            <input
+              type="text"
+              value={talkTopic}
+              onChange={(e) => setTalkTopic(e.target.value)}
+              placeholder="Escribe o selecciona el tema tratado..."
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-400"
+            />
+          </div>
+
+          {/* 2. Talk Type & Sector */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <span className="text-xs font-bold text-slate-200 tracking-wide uppercase">
+                2. Tipo de Charla
+              </span>
+              <select
+                value={talkType}
+                onChange={(e) => setTalkType(e.target.value as SafetyTalkType)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-400"
+              >
+                <option value="Charla 5 Minutos">Charla 5 Minutos</option>
+                <option value="Inducción Terreno">Inducción Terreno</option>
+                <option value="ART / AST Previo">ART / AST Previo</option>
+                <option value="Capacitación Específica">Capacitación Específica</option>
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <span className="text-xs font-bold text-slate-200 tracking-wide uppercase">
+                Sector / Faena
+              </span>
+              <select
+                value={zone}
+                onChange={(e) => setZone(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-400"
+              >
+                {FIELD_ZONES.map((z) => (
+                  <option key={z} value={z}>
+                    {z}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* 3. Attendees */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-200 tracking-wide uppercase flex items-center gap-1.5">
+                <Users className="w-3.5 h-3.5 text-emerald-400" />
+                <span>3. Trabajadores Asistentes</span>
+              </span>
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="text-[11px] text-slate-400">Total:</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={attendeesCount}
+                  onChange={(e) => setAttendeesCount(Math.max(1, Number(e.target.value) || 1))}
+                  className="w-14 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-center font-mono text-xs text-emerald-300 focus:outline-none focus:border-emerald-400"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={attendeeInput}
+                onChange={(e) => setAttendeeInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleAddAttendee();
+                  }
+                }}
+                placeholder="Nombre del trabajador asistente..."
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-400"
+              />
+              <button
+                type="button"
+                onClick={handleAddAttendee}
+                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-slate-700 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Agregar</span>
+              </button>
+            </div>
+
+            {attendeeNames.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {attendeeNames.map((name, idx) => (
+                  <span
+                    key={`${name}-${idx}`}
+                    className="inline-flex items-center gap-1 bg-slate-950 border border-slate-700 text-slate-200 text-[11px] px-2 py-1 rounded-lg"
+                  >
+                    <span>{name}</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setAttendeeNames((prev) => prev.filter((_, i) => i !== idx))
+                      }
+                      className="text-slate-400 hover:text-rose-400 cursor-pointer"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 4. Digital Signature Pad */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-200 tracking-wide uppercase flex items-center gap-1.5">
+                <PenTool className="w-3.5 h-3.5 text-amber-400" />
+                <span>4. Firma del Trabajador / Responsable</span>
+              </span>
+              <button
+                type="button"
+                onClick={handleClearSignature}
+                className="text-[11px] text-rose-400 hover:text-rose-300 flex items-center gap-1 cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+                <span>Limpiar Firma</span>
+              </button>
+            </div>
+
+            <div className="relative rounded-xl overflow-hidden border-2 border-slate-700 bg-white">
+              <canvas
+                ref={signatureCanvasRef}
+                width={520}
+                height={180}
+                onPointerDown={handleSignaturePointerDown}
+                onPointerMove={handleSignaturePointerMove}
+                onPointerUp={handleSignaturePointerUp}
+                onPointerLeave={handleSignaturePointerUp}
+                style={{ touchAction: 'none' }}
+                className="w-full h-36 block cursor-crosshair"
+              />
+              {!hasSignature && (
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs text-slate-400 font-medium">
+                  Firma aquí con el dedo o puntero
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 5. Optional Physical Attendance Sheet Photo */}
+          <div className="space-y-2">
+            <span className="text-xs font-bold text-slate-200 tracking-wide uppercase">
+              5. Foto de Planilla Firmada (Opcional)
+            </span>
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              ref={talkPhotoInputRef}
+              onChange={handleTalkPhotoCapture}
+              className="hidden"
+            />
+            {!talkPhoto ? (
+              <button
+                type="button"
+                onClick={() => talkPhotoInputRef.current?.click()}
+                className="w-full py-2.5 px-3 bg-slate-950 hover:bg-slate-800 border border-dashed border-slate-700 hover:border-emerald-400 rounded-xl text-xs text-slate-300 flex items-center justify-center gap-2 cursor-pointer transition-colors"
+              >
+                <Camera className="w-4 h-4 text-emerald-400" />
+                <span>Adjuntar Foto de Hoja / Asistencia</span>
+              </button>
+            ) : (
+              <div className="relative rounded-xl overflow-hidden border border-slate-700 bg-black aspect-video max-h-44 flex items-center justify-center">
+                <img
+                  src={talkPhoto}
+                  alt="Planilla firmada adjunta"
+                  className="w-full h-full object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTalkPhoto(null);
+                    if (talkPhotoInputRef.current) talkPhotoInputRef.current.value = '';
+                  }}
+                  className="absolute bottom-2 right-2 px-2.5 py-1 bg-slate-900/90 text-rose-300 text-xs font-semibold rounded-md border border-slate-700 cursor-pointer"
+                >
+                  Quitar Foto
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* 6. Notes */}
+          <div className="space-y-1.5">
+            <span className="text-xs font-bold text-slate-200 tracking-wide uppercase">
+              Observaciones (Opcional)
+            </span>
+            <textarea
+              rows={2}
+              value={talkNotes}
+              onChange={(e) => setTalkNotes(e.target.value)}
+              placeholder="Compromisos, riesgos revisados o comentarios de la cuadrilla..."
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-400 resize-none"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={isSubmittingTalk}
+            className="w-full py-3.5 px-4 bg-emerald-400 hover:bg-emerald-300 active:bg-emerald-500 text-slate-950 font-bold text-sm rounded-xl transition-all shadow-lg shadow-emerald-950/60 flex items-center justify-center gap-2 cursor-pointer active:scale-[0.98] disabled:opacity-60"
+          >
+            <Send className="w-4 h-4 text-slate-950" />
+            <span>
+              {isSubmittingTalk ? 'ENVIANDO CHARLA...' : 'ENVIAR CHARLA FIRMADA A MATRIZ'}
+            </span>
+          </button>
+        </form>
+        ) : (
+        /* MATRIX NOTIFICATIONS INBOX FOR FIELD WORKER */
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                <Bell className="w-4 h-4 text-blue-400" />
+                <span>Notificaciones desde Matriz PRL</span>
+              </h2>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Instrucciones y alertas enviadas por supervisión para tu jornada en terreno.
+              </p>
+            </div>
+            {unreadNotifications.length > 0 && (
+              <span className="text-[11px] font-mono font-bold bg-rose-600/20 text-rose-300 border border-rose-500/40 px-2 py-0.5 rounded shrink-0">
+                {unreadNotifications.length} sin leer
+              </span>
+            )}
+          </div>
+
+          {notifPermission === 'default' && (
+            <div className="bg-blue-950/50 border border-blue-700/40 rounded-xl p-3 flex items-center justify-between gap-2 text-xs">
+              <span className="text-blue-200 text-[11px]">
+                Activa las alertas del navegador para recibir avisos visuales al instante.
+              </span>
+              <button
+                type="button"
+                onClick={handleEnableBrowserAlerts}
+                className="px-2.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-[11px] shrink-0 cursor-pointer"
+              >
+                Activar Alertas
+              </button>
+            </div>
+          )}
+
+          {workerNotifications.length === 0 ? (
+            <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-8 text-center space-y-2">
+              <Bell className="w-7 h-7 text-slate-600 mx-auto" />
+              <div className="text-xs font-semibold text-slate-300">
+                Sin notificaciones desde la Matriz
+              </div>
+              <p className="text-[11px] text-slate-500">
+                Cuando la jefatura PRL envíe un aviso o instrucción operativa, aparecerá aquí con alerta sonora.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {workerNotifications.map((notif) => {
+                const acked = isNotifAcknowledgedHere(notif);
+                const matchesMyWorker =
+                  !notif.targetWorker ||
+                  notif.targetWorker === 'Todos' ||
+                  notif.targetWorker.toLowerCase().includes(workerName.trim().toLowerCase());
+                return (
+                  <div
+                    key={notif.id}
+                    className={`rounded-xl p-3.5 border space-y-2.5 ${
+                      !acked && notif.priority === 'Urgente'
+                        ? 'bg-rose-950/40 border-rose-500/60'
+                        : !acked && notif.priority === 'Advertencia'
+                        ? 'bg-amber-950/30 border-amber-500/50'
+                        : 'bg-slate-950 border-slate-800'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                          <span
+                            className={`px-2 py-0.5 rounded font-bold uppercase flex items-center gap-1 ${
+                              notif.priority === 'Urgente'
+                                ? 'bg-rose-600 text-white'
+                                : notif.priority === 'Advertencia'
+                                ? 'bg-amber-400 text-slate-950'
+                                : 'bg-blue-600 text-white'
+                            }`}
+                          >
+                            {notif.priority === 'Urgente' ? (
+                              <Siren className="w-3 h-3" />
+                            ) : notif.priority === 'Advertencia' ? (
+                              <AlertTriangle className="w-3 h-3" />
+                            ) : (
+                              <Info className="w-3 h-3" />
+                            )}
+                            <span>{notif.priority}</span>
+                          </span>
+                          <span className="font-mono text-slate-400">{notif.code}</span>
+                          {notif.targetWorker && notif.targetWorker !== 'Todos' && (
+                            <span
+                              className={`px-1.5 py-0.5 rounded font-semibold ${
+                                matchesMyWorker
+                                  ? 'bg-emerald-950 text-emerald-300 border border-emerald-700/50'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}
+                            >
+                              Para: {notif.targetWorker}
+                            </span>
+                          )}
+                        </div>
+                        <h3 className="text-xs font-bold text-slate-100 leading-snug">
+                          {notif.title}
+                        </h3>
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-500 shrink-0">
+                        {notif.timeFormatted}
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-slate-300 leading-relaxed">
+                      {notif.message}
+                    </p>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80 text-[11px]">
+                      <div className="text-slate-400 flex items-center gap-1">
+                        <MapPin className="w-3 h-3 text-amber-400 shrink-0" />
+                        <span>{notif.targetZone}</span>
+                      </div>
+
+                      {acked ? (
+                        <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>Lectura confirmada</span>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleAcknowledgeNotif(notif.id)}
+                          className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <CheckCheck className="w-3.5 h-3.5" />
+                          <span>Entendido</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        )}
 
         {/* Field History & Offline Queue View */}
         {showHistory && (
@@ -1258,6 +2244,26 @@ export const SatelliteFieldApp: React.FC<SatelliteFieldAppProps> = ({
                           )
                         )}
                       </div>
+                    </div>
+                  ))}
+                  {myRecentTalks.slice(0, 4).map((talk) => (
+                    <div
+                      key={talk.id}
+                      className="p-2.5 bg-slate-950 rounded-xl border border-emerald-900/60 flex items-start justify-between gap-2 text-xs"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-400">
+                          <span className="text-emerald-400 font-bold">{talk.code}</span>
+                          <span>·</span>
+                          <span className="truncate max-w-[130px]">{talk.talkType}</span>
+                        </div>
+                        <div className="text-xs font-semibold text-slate-200 mt-0.5 line-clamp-1">
+                          {talk.topic}
+                        </div>
+                      </div>
+                      <span className="text-[10px] px-2 py-0.5 rounded font-mono bg-emerald-950 text-emerald-300 border border-emerald-800 shrink-0">
+                        {talk.status}
+                      </span>
                     </div>
                   ))}
                 </div>

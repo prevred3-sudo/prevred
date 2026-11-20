@@ -5,7 +5,9 @@
 2. `reporterUid` and `createdAt` are immutable after creation.
 3. Terminal status locking: Once an incident has `status == 'Cerrado'`, non-admin users cannot update it. Only an admin (`prevred3@gmail.com` verified or listed in `/admins/{uid}`) can modify or reopen a closed incident or delete any incident.
 4. Only verified authenticated users can trigger an SOS alert in `/emergencies/{emergencyId}` (`triggeredByUid == request.auth.uid`), and only admins can clear/dismiss an active emergency (`active == false`).
-5. No user can self-assign admin privileges in `/admins/{userId}`.
+5. Every document in `/safety_talks/{talkId}` must have `reporterUid == request.auth.uid`, `email_verified == true`, `status == 'Enviada'` on create, bounded `attendeeNames.size() <= 50`, and `createdAt == request.time`, `updatedAt == request.time`. Only admins can validate (`status == 'Validada Matriz'`) or delete safety talks.
+6. Every document in `/worker_notifications/{notificationId}` can only be created or deleted by verified admins (`isAdmin()`), with `senderUid == request.auth.uid`, `active == true`, `acknowledgedBy.size() <= 50`, and server timestamps. Verified field workers can read active notifications (`active == true`) and confirm receipt strictly by updating `['acknowledgedBy', 'updatedAt']` without altering message content or immutable fields.
+7. No user can self-assign admin privileges in `/admins/{userId}`.
 
 ## 2. Dirty Dozen Payloads (Must Return PERMISSION_DENIED)
 1. Unauthenticated read or write to `/incidents/inc-1` (`request.auth == null`).

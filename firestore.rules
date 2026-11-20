@@ -174,6 +174,173 @@ service cloud.firestore {
       allow delete: if isValidId(emergencyId) && isAdmin();
     }
 
+    // --- Safety Talk Validation Blueprint ---
+    function isValidSafetyTalkType(t) {
+      return t in [
+        'Charla 5 Minutos',
+        'Inducción Terreno',
+        'ART / AST Previo',
+        'Capacitación Específica'
+      ];
+    }
+
+    function isValidSafetyTalkStatus(st) {
+      return st in ['Enviada', 'Validada Matriz'];
+    }
+
+    function isValidSafetyTalkData(data) {
+      return data.keys().hasAll([
+          'id', 'code', 'timestamp', 'dateFormatted', 'topic', 'talkType',
+          'location', 'instructorName', 'attendeesCount', 'attendeeNames',
+          'notes', 'status', 'reporterUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'code', 'timestamp', 'dateFormatted', 'topic', 'talkType',
+          'location', 'instructorName', 'attendeesCount', 'attendeeNames',
+          'notes', 'signatureDataUrl', 'photoUrl', 'status', 'reporterUid',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.code is string && data.code.size() >= 2 && data.code.size() <= 40
+        && data.timestamp is string && data.timestamp.size() >= 10 && data.timestamp.size() <= 64
+        && data.dateFormatted is string && data.dateFormatted.size() <= 100
+        && data.topic is string && data.topic.size() >= 1 && data.topic.size() <= 300
+        && isValidSafetyTalkType(data.talkType)
+        && data.location is string && data.location.size() >= 1 && data.location.size() <= 300
+        && data.instructorName is string && data.instructorName.size() >= 1 && data.instructorName.size() <= 120
+        && data.attendeesCount is int && data.attendeesCount >= 1 && data.attendeesCount <= 200
+        && data.attendeeNames is list && data.attendeeNames.size() <= 50
+        && (data.attendeeNames.size() == 0 || (data.attendeeNames[0] is string && data.attendeeNames[0].size() <= 120))
+        && data.notes is string && data.notes.size() <= 1500
+        && (!('signatureDataUrl' in data) || (data.signatureDataUrl is string && data.signatureDataUrl.size() <= 300000))
+        && (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 500000))
+        && isValidSafetyTalkStatus(data.status)
+        && data.reporterUid is string && data.reporterUid.size() >= 1 && data.reporterUid.size() <= 128
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // --- Collection: /safety_talks/{talkId} ---
+    match /safety_talks/{talkId} {
+      allow get: if isValidId(talkId) && (
+        isAdmin() || (isVerifiedUser() && existing().reporterUid == request.auth.uid)
+      );
+
+      allow list: if isAdmin() || (
+        isVerifiedUser() && resource.data.reporterUid == request.auth.uid
+      );
+
+      allow create: if isValidId(talkId)
+        && isVerifiedUser()
+        && isValidSafetyTalkData(incoming())
+        && incoming().id == talkId
+        && incoming().reporterUid == request.auth.uid
+        && incoming().status == 'Enviada'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(talkId)
+        && isVerifiedUser()
+        && isValidSafetyTalkData(incoming())
+        && incoming().id == existing().id
+        && incoming().reporterUid == existing().reporterUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            existing().reporterUid == request.auth.uid
+            && existing().status != 'Validada Matriz'
+            && incoming().status == existing().status
+            && incoming().diff(existing()).affectedKeys().hasOnly(['notes', 'attendeeNames', 'attendeesCount', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isValidId(talkId) && isAdmin();
+    }
+
+    // --- Worker Notification Validation Blueprint ---
+    function isValidNotificationPriority(p) {
+      return p in ['Informativa', 'Advertencia', 'Urgente'];
+    }
+
+    function isValidWorkerNotificationData(data) {
+      return data.keys().hasAll([
+          'id', 'code', 'timestamp', 'timeFormatted', 'title', 'message',
+          'priority', 'targetZone', 'targetWorker', 'senderName', 'senderUid',
+          'active', 'acknowledgedBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'code', 'timestamp', 'timeFormatted', 'title', 'message',
+          'priority', 'targetZone', 'targetWorker', 'senderName', 'senderUid',
+          'active', 'acknowledgedBy', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.code is string && data.code.size() >= 2 && data.code.size() <= 40
+        && data.timestamp is string && data.timestamp.size() >= 10 && data.timestamp.size() <= 64
+        && data.timeFormatted is string && data.timeFormatted.size() <= 100
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 1500
+        && isValidNotificationPriority(data.priority)
+        && data.targetZone is string && data.targetZone.size() >= 1 && data.targetZone.size() <= 300
+        && data.targetWorker is string && data.targetWorker.size() >= 1 && data.targetWorker.size() <= 120
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120
+        && data.senderUid is string && data.senderUid.size() >= 1 && data.senderUid.size() <= 128
+        && data.active is bool
+        && data.acknowledgedBy is list && data.acknowledgedBy.size() <= 50
+        && (data.acknowledgedBy.size() == 0 || (data.acknowledgedBy[0] is string && data.acknowledgedBy[0].size() <= 120))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // --- Collection: /worker_notifications/{notificationId} ---
+    match /worker_notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && (
+        isAdmin() || (isVerifiedUser() && existing().active == true)
+      );
+
+      allow list: if isAdmin() || (
+        isVerifiedUser() && resource.data.active == true
+      );
+
+      allow create: if isValidId(notificationId)
+        && isAdmin()
+        && isValidWorkerNotificationData(incoming())
+        && incoming().id == notificationId
+        && incoming().senderUid == request.auth.uid
+        && incoming().active == true
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(notificationId)
+        && isVerifiedUser()
+        && isValidWorkerNotificationData(incoming())
+        && incoming().id == existing().id
+        && incoming().senderUid == existing().senderUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            existing().active == true
+            && incoming().code == existing().code
+            && incoming().timestamp == existing().timestamp
+            && incoming().timeFormatted == existing().timeFormatted
+            && incoming().title == existing().title
+            && incoming().message == existing().message
+            && incoming().priority == existing().priority
+            && incoming().targetZone == existing().targetZone
+            && incoming().targetWorker == existing().targetWorker
+            && incoming().senderName == existing().senderName
+            && incoming().active == existing().active
+            && incoming().acknowledgedBy.size() >= existing().acknowledgedBy.size()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['acknowledgedBy', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isValidId(notificationId) && isAdmin();
+    }
+
     // --- Collection: /admins/{userId} ---
     match /admins/{userId} {
       allow get: if isValidId(userId) && (isAdmin() || (isVerifiedUser() && request.auth.uid == userId));

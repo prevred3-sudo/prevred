@@ -89,6 +89,10 @@ const INITIAL_SEED_INCIDENTS = [
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'incidents_db.json');
 const DELETED_FILE = path.join(DATA_DIR, 'deleted_ids.json');
+const TALKS_FILE = path.join(DATA_DIR, 'talks_db.json');
+const DELETED_TALKS_FILE = path.join(DATA_DIR, 'deleted_talk_ids.json');
+const NOTIFICATIONS_FILE = path.join(DATA_DIR, 'notifications_db.json');
+const DELETED_NOTIFICATIONS_FILE = path.join(DATA_DIR, 'deleted_notification_ids.json');
 
 // Ensure data folder exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -107,6 +111,18 @@ try {
   // Ignore corrupted deleted file
 }
 
+const deletedTalkIds = new Set<string>();
+try {
+  if (fs.existsSync(DELETED_TALKS_FILE)) {
+    const parsedDeletedTalks = JSON.parse(fs.readFileSync(DELETED_TALKS_FILE, 'utf-8'));
+    if (Array.isArray(parsedDeletedTalks)) {
+      parsedDeletedTalks.forEach((id) => typeof id === 'string' && deletedTalkIds.add(id));
+    }
+  }
+} catch {
+  // Ignore corrupted deleted talks file
+}
+
 let inMemoryIncidents: any[] = [];
 try {
   if (fs.existsSync(DB_FILE)) {
@@ -120,6 +136,46 @@ try {
   }
 } catch {
   inMemoryIncidents = [...INITIAL_SEED_INCIDENTS];
+}
+
+let inMemoryTalks: any[] = [];
+try {
+  if (fs.existsSync(TALKS_FILE)) {
+    const parsedTalks = JSON.parse(fs.readFileSync(TALKS_FILE, 'utf-8'));
+    inMemoryTalks = Array.isArray(parsedTalks)
+      ? parsedTalks.filter((t) => t && !deletedTalkIds.has(t.id))
+      : [];
+  } else {
+    fs.writeFileSync(TALKS_FILE, JSON.stringify([], null, 2));
+  }
+} catch {
+  inMemoryTalks = [];
+}
+
+const deletedNotificationIds = new Set<string>();
+try {
+  if (fs.existsSync(DELETED_NOTIFICATIONS_FILE)) {
+    const parsedDeletedNotifs = JSON.parse(fs.readFileSync(DELETED_NOTIFICATIONS_FILE, 'utf-8'));
+    if (Array.isArray(parsedDeletedNotifs)) {
+      parsedDeletedNotifs.forEach((id) => typeof id === 'string' && deletedNotificationIds.add(id));
+    }
+  }
+} catch {
+  // Ignore corrupted deleted notifications file
+}
+
+let inMemoryNotifications: any[] = [];
+try {
+  if (fs.existsSync(NOTIFICATIONS_FILE)) {
+    const parsedNotifs = JSON.parse(fs.readFileSync(NOTIFICATIONS_FILE, 'utf-8'));
+    inMemoryNotifications = Array.isArray(parsedNotifs)
+      ? parsedNotifs.filter((n) => n && !deletedNotificationIds.has(n.id))
+      : [];
+  } else {
+    fs.writeFileSync(NOTIFICATIONS_FILE, JSON.stringify([], null, 2));
+  }
+} catch {
+  inMemoryNotifications = [];
 }
 
 let inMemoryEmergency = {
@@ -137,6 +193,10 @@ function persistDb() {
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(inMemoryIncidents, null, 2));
     fs.writeFileSync(DELETED_FILE, JSON.stringify(Array.from(deletedIncidentIds), null, 2));
+    fs.writeFileSync(TALKS_FILE, JSON.stringify(inMemoryTalks, null, 2));
+    fs.writeFileSync(DELETED_TALKS_FILE, JSON.stringify(Array.from(deletedTalkIds), null, 2));
+    fs.writeFileSync(NOTIFICATIONS_FILE, JSON.stringify(inMemoryNotifications, null, 2));
+    fs.writeFileSync(DELETED_NOTIFICATIONS_FILE, JSON.stringify(Array.from(deletedNotificationIds), null, 2));
   } catch (err) {
     console.error('Error saving DB to disk:', err);
   }
@@ -166,6 +226,8 @@ async function startServer() {
         type: 'init',
         payload: {
           incidents: inMemoryIncidents,
+          safetyTalks: inMemoryTalks,
+          workerNotifications: inMemoryNotifications,
           emergency: inMemoryEmergency
         },
         serverTime: Date.now()
@@ -279,6 +341,177 @@ async function startServer() {
     res.json({ success: true, message: 'Incidente eliminado exitosamente', id });
   });
 
+  // 3c. Signed Safety Talks (Charlas Firmadas)
+  app.get('/api/talks', (req, res) => {
+    res.json({ success: true, data: inMemoryTalks });
+  });
+
+  app.post('/api/talks', (req, res) => {
+    const newTalk = req.body;
+    if (!newTalk || !newTalk.topic) {
+      return res.status(400).json({ success: false, error: 'Tema de charla requerido' });
+    }
+
+    const talkId = newTalk.id || `talk-${Date.now()}`;
+    if (deletedTalkIds.has(talkId)) {
+      deletedTalkIds.delete(talkId);
+    }
+
+    const existingIdx = inMemoryTalks.findIndex((t) => t.id === talkId);
+    if (existingIdx !== -1) {
+      return res.status(200).json({ success: true, data: inMemoryTalks[existingIdx], deduplicated: true });
+    }
+
+    const talkToSave = {
+      ...newTalk,
+      id: talkId,
+      timestamp: newTalk.timestamp || new Date().toISOString()
+    };
+
+    inMemoryTalks = [talkToSave, ...inMemoryTalks];
+    persistDb();
+    broadcastEvent('talk:created', talkToSave);
+
+    console.log(`[PRL Charla Firmada] Recibida desde Terreno: ${talkToSave.code} - ${talkToSave.topic}`);
+    res.status(201).json({ success: true, data: talkToSave });
+  });
+
+  app.post('/api/talks/batch', (req, res) => {
+    const incomingList = Array.isArray(req.body?.talks) ? req.body.talks : [];
+    let addedCount = 0;
+
+    for (const item of incomingList) {
+      if (!item || !item.id || !item.topic) continue;
+      if (deletedTalkIds.has(item.id)) continue;
+      if (!inMemoryTalks.some((existing) => existing.id === item.id || (item.code && existing.code === item.code))) {
+        inMemoryTalks.unshift(item);
+        addedCount++;
+      }
+    }
+
+    if (addedCount > 0) {
+      inMemoryTalks.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      persistDb();
+      broadcastEvent('talks:synced', inMemoryTalks);
+    }
+
+    res.json({ success: true, addedCount, data: inMemoryTalks });
+  });
+
+  app.put('/api/talks/:id', (req, res) => {
+    const { id } = req.params;
+    const updated = req.body;
+    const idx = inMemoryTalks.findIndex((t) => t.id === id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: 'Charla no encontrada' });
+    }
+
+    inMemoryTalks[idx] = { ...inMemoryTalks[idx], ...updated };
+    persistDb();
+    broadcastEvent('talk:updated', inMemoryTalks[idx]);
+    res.json({ success: true, data: inMemoryTalks[idx] });
+  });
+
+  app.delete('/api/talks/:id', (req, res) => {
+    const { id } = req.params;
+    deletedTalkIds.add(id);
+    inMemoryTalks = inMemoryTalks.filter((t) => t.id !== id);
+    persistDb();
+    broadcastEvent('talk:deleted', { id });
+    res.json({ success: true, message: 'Charla eliminada exitosamente', id });
+  });
+
+  // 3d. Worker Notifications (Matriz -> Satélite)
+  app.get('/api/notifications', (req, res) => {
+    res.json({ success: true, data: inMemoryNotifications });
+  });
+
+  app.post('/api/notifications', (req, res) => {
+    const newNotif = req.body;
+    if (!newNotif || !newNotif.title || !newNotif.message) {
+      return res.status(400).json({ success: false, error: 'Título y mensaje requeridos' });
+    }
+
+    const notifId = newNotif.id || `notif-${Date.now()}`;
+    if (deletedNotificationIds.has(notifId)) {
+      deletedNotificationIds.delete(notifId);
+    }
+
+    const existingIdx = inMemoryNotifications.findIndex((n) => n.id === notifId);
+    if (existingIdx !== -1) {
+      return res.status(200).json({ success: true, data: inMemoryNotifications[existingIdx], deduplicated: true });
+    }
+
+    const notifToSave = {
+      ...newNotif,
+      id: notifId,
+      timestamp: newNotif.timestamp || new Date().toISOString(),
+      active: newNotif.active !== false,
+      acknowledgedBy: Array.isArray(newNotif.acknowledgedBy) ? newNotif.acknowledgedBy : []
+    };
+
+    inMemoryNotifications = [notifToSave, ...inMemoryNotifications];
+    persistDb();
+    broadcastEvent('notification:created', notifToSave);
+
+    console.log(`[PRL Notificación Matriz->Satélite] ${notifToSave.code} (${notifToSave.priority}): ${notifToSave.title}`);
+    res.status(201).json({ success: true, data: notifToSave });
+  });
+
+  app.post('/api/notifications/batch', (req, res) => {
+    const incomingList = Array.isArray(req.body?.notifications) ? req.body.notifications : [];
+    let addedCount = 0;
+
+    for (const item of incomingList) {
+      if (!item || !item.id || !item.title) continue;
+      if (deletedNotificationIds.has(item.id)) continue;
+      if (!inMemoryNotifications.some((existing) => existing.id === item.id)) {
+        inMemoryNotifications.unshift(item);
+        addedCount++;
+      }
+    }
+
+    if (addedCount > 0) {
+      inMemoryNotifications.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      persistDb();
+      broadcastEvent('notifications:synced', inMemoryNotifications);
+    }
+
+    res.json({ success: true, addedCount, data: inMemoryNotifications });
+  });
+
+  app.post('/api/notifications/:id/ack', (req, res) => {
+    const { id } = req.params;
+    const workerName = String(req.body?.workerName || 'Operador Terreno').trim().slice(0, 120);
+    const idx = inMemoryNotifications.findIndex((n) => n.id === id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: 'Notificación no encontrada' });
+    }
+
+    const currentAck: string[] = Array.isArray(inMemoryNotifications[idx].acknowledgedBy)
+      ? inMemoryNotifications[idx].acknowledgedBy
+      : [];
+    if (workerName && !currentAck.includes(workerName)) {
+      inMemoryNotifications[idx] = {
+        ...inMemoryNotifications[idx],
+        acknowledgedBy: [...currentAck, workerName].slice(0, 50)
+      };
+      persistDb();
+      broadcastEvent('notification:updated', inMemoryNotifications[idx]);
+    }
+
+    res.json({ success: true, data: inMemoryNotifications[idx] });
+  });
+
+  app.delete('/api/notifications/:id', (req, res) => {
+    const { id } = req.params;
+    deletedNotificationIds.add(id);
+    inMemoryNotifications = inMemoryNotifications.filter((n) => n.id !== id);
+    persistDb();
+    broadcastEvent('notification:deleted', { id });
+    res.json({ success: true, message: 'Notificación eliminada exitosamente', id });
+  });
+
   // 4. Emergency State
   app.get('/api/emergency', (req, res) => {
     res.json({ success: true, data: inMemoryEmergency });
@@ -298,6 +531,8 @@ async function startServer() {
       status: 'ok',
       serverTime: new Date().toISOString(),
       incidentCount: inMemoryIncidents.length,
+      talksCount: inMemoryTalks.length,
+      notificationsCount: inMemoryNotifications.length,
       connectedClients: wss.clients.size
     });
   });

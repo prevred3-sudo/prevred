@@ -2,12 +2,14 @@ import React from 'react';
 import { Volume2, VolumeX, ShieldAlert, Plus } from 'lucide-react';
 
 interface NavbarProps {
-  currentTab: 'dashboard' | 'incidents';
-  onSelectTab: (tab: 'dashboard' | 'incidents') => void;
+  currentTab: 'dashboard' | 'incidents' | 'talks' | 'notifications';
+  onSelectTab: (tab: 'dashboard' | 'incidents' | 'talks' | 'notifications') => void;
   onOpenReportModal: () => void;
   soundEnabled: boolean;
   onToggleSound: () => void;
   openIncidentsCount: number;
+  talksCount: number;
+  notificationsCount: number;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -16,7 +18,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenReportModal,
   soundEnabled,
   onToggleSound,
-  openIncidentsCount
+  openIncidentsCount,
+  talksCount,
+  notificationsCount
 }) => {
   return (
     <header className="sticky top-0 z-40 bg-slate-950/90 backdrop-blur-md border-b border-slate-800">
@@ -69,7 +73,37 @@ export const Navbar: React.FC<NavbarProps> = ({
               )}
             </button>
 
+            <button
+              onClick={() => onSelectTab('talks')}
+              className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 py-1 flex items-center gap-1.5 ${
+                currentTab === 'talks'
+                  ? 'text-amber-400 border-b-2 border-amber-400'
+                  : ''
+              }`}
+            >
+              <span>Charlas Firmadas</span>
+              {talksCount > 0 && (
+                <span className="text-xs font-mono text-emerald-300">
+                  ({talksCount})
+                </span>
+              )}
+            </button>
 
+            <button
+              onClick={() => onSelectTab('notifications')}
+              className={`hover:text-slate-100 transition-colors whitespace-nowrap shrink-0 py-1 flex items-center gap-1.5 ${
+                currentTab === 'notifications'
+                  ? 'text-amber-400 border-b-2 border-amber-400'
+                  : ''
+              }`}
+            >
+              <span>Avisos Terreno</span>
+              {notificationsCount > 0 && (
+                <span className="text-xs font-mono text-amber-300">
+                  ({notificationsCount})
+                </span>
+              )}
+            </button>
           </nav>
 
           {/* Zone 3: 1 primary action (+ sound affordance) */}
@@ -112,6 +146,18 @@ export const Navbar: React.FC<NavbarProps> = ({
             className={`whitespace-nowrap shrink-0 ${currentTab === 'incidents' ? 'text-amber-400 font-bold' : ''}`}
           >
             Incidentes ({openIncidentsCount})
+          </button>
+          <button
+            onClick={() => onSelectTab('talks')}
+            className={`whitespace-nowrap shrink-0 ${currentTab === 'talks' ? 'text-amber-400 font-bold' : ''}`}
+          >
+            Charlas ({talksCount})
+          </button>
+          <button
+            onClick={() => onSelectTab('notifications')}
+            className={`whitespace-nowrap shrink-0 ${currentTab === 'notifications' ? 'text-amber-400 font-bold' : ''}`}
+          >
+            Avisos ({notificationsCount})
           </button>
         </div>
       </div>

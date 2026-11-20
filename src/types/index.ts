@@ -97,3 +97,45 @@ export interface EmergencyState {
   totalWorkers: number;
   assemblyPoint: string;
 }
+
+export type SafetyTalkType =
+  | 'Charla 5 Minutos'
+  | 'Inducción Terreno'
+  | 'ART / AST Previo'
+  | 'Capacitación Específica';
+
+export type SafetyTalkStatus = 'Enviada' | 'Validada Matriz';
+
+export interface SafetyTalk {
+  id: string;
+  code: string;
+  timestamp: string;
+  dateFormatted: string;
+  topic: string;
+  talkType: SafetyTalkType;
+  location: string;
+  instructorName: string;
+  attendeesCount: number;
+  attendeeNames: string[];
+  notes: string;
+  signatureDataUrl?: string;
+  photoUrl?: string;
+  status: SafetyTalkStatus;
+}
+
+export type NotificationPriority = 'Informativa' | 'Advertencia' | 'Urgente';
+
+export interface WorkerNotification {
+  id: string;
+  code: string;
+  timestamp: string;
+  timeFormatted: string;
+  title: string;
+  message: string;
+  priority: NotificationPriority;
+  targetZone: string;
+  targetWorker: string;
+  senderName: string;
+  active: boolean;
+  acknowledgedBy: string[];
+}

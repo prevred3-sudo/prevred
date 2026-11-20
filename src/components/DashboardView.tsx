@@ -11,7 +11,8 @@ import {
   TrendingUp,
   MapPin,
   Radio,
-  Trash2
+  Trash2,
+  Bell
 } from 'lucide-react';
 import { Incident } from '../types';
 
@@ -25,6 +26,7 @@ interface DashboardViewProps {
   onSimulateLiveIncident: () => void;
   daysWithoutLTI: number;
   onDeleteIncident?: (id: string) => void;
+  onOpenNotificationsTab?: () => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -36,7 +38,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onSelectIncident,
   onSimulateLiveIncident,
   daysWithoutLTI,
-  onDeleteIncident
+  onDeleteIncident,
+  onOpenNotificationsTab
 }) => {
   const [incidentToDelete, setIncidentToDelete] = useState<Incident | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -225,6 +228,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <QrCode className="w-3.5 h-3.5 text-amber-400" />
               <span>Ver Código QR para Escanear en Celular</span>
             </button>
+
+            {onOpenNotificationsTab && (
+              <button
+                onClick={onOpenNotificationsTab}
+                className="w-full py-2 px-3 bg-blue-600/20 hover:bg-blue-600/30 text-blue-200 border border-blue-500/40 text-xs font-semibold rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Bell className="w-3.5 h-3.5 text-blue-400" />
+                <span>Enviar Notificación a Trabajadores</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

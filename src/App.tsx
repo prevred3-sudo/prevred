@@ -4,13 +4,15 @@ import { User } from 'firebase/auth';
 import { Navbar } from './components/Navbar';
 import { DashboardView } from './components/DashboardView';
 import { IncidentLiveStreamView } from './components/IncidentLiveStreamView';
+import { SafetyTalksView } from './components/SafetyTalksView';
+import { WorkerNotificationsView } from './components/WorkerNotificationsView';
 import { SatelliteFieldApp } from './components/SatelliteFieldApp';
 import { NewIncidentModal } from './components/NewIncidentModal';
 import { IncidentDossierModal } from './components/IncidentDossierModal';
 import { QrCodeModal } from './components/QrCodeModal';
 import { GoogleDriveSyncModal } from './components/GoogleDriveSyncModal';
 import { INITIAL_INCIDENTS } from './data/initialData';
-import { EmergencyState, Incident } from './types';
+import { EmergencyState, Incident, SafetyTalk, WorkerNotification } from './types';
 import { safetyAudio } from './utils/audioAlert';
 import {
   fetchIncidentsFromServer,
@@ -18,7 +20,17 @@ import {
   syncBatchIncidentsApi,
   updateIncidentApi,
   deleteIncidentApi,
-  updateEmergencyApi
+  updateEmergencyApi,
+  fetchTalksFromServer,
+  createTalkApi,
+  syncBatchTalksApi,
+  updateTalkApi,
+  deleteTalkApi,
+  fetchNotificationsFromServer,
+  createNotificationApi,
+  syncBatchNotificationsApi,
+  acknowledgeNotificationApi,
+  deleteNotificationApi
 } from './services/api';
 import {
   formatFirebaseAuthError,
@@ -33,12 +45,22 @@ import {
   deleteIncidentFromFirestore,
   subscribeIncidentsFromFirestore,
   saveEmergencyToFirestore,
-  subscribeEmergencyFromFirestore
+  subscribeEmergencyFromFirestore,
+  saveSafetyTalkToFirestore,
+  updateSafetyTalkInFirestore,
+  deleteSafetyTalkFromFirestore,
+  subscribeSafetyTalksFromFirestore,
+  saveWorkerNotificationToFirestore,
+  acknowledgeWorkerNotificationInFirestore,
+  deleteWorkerNotificationFromFirestore,
+  subscribeWorkerNotificationsFromFirestore
 } from './services/firestoreSyncService';
 
 const SYNC_CHANNEL_NAME = 'prevriesgos-prl-sync';
 const DELETED_IDS_KEY = 'prev_deleted_ids';
 const DELETED_CODES_KEY = 'prev_deleted_codes';
+const DELETED_TALK_IDS_KEY = 'prev_deleted_talk_ids';
+const DELETED_NOTIFICATION_IDS_KEY = 'prev_deleted_notification_ids';
 
 function loadStoredSet(key: string): Set<string> {
   if (typeof window === 'undefined') return new Set();
@@ -62,6 +84,39 @@ function saveStoredSet(key: string, set: Set<string>) {
 
 function mergeUniqueIncidents(incoming: Incident[], current: Incident[]): Incident[] {
   const map = new Map<string, Incident>();
+  for (const item of incoming) {
+    if (item && item.id) map.set(item.id, item);
+  }
+  for (const item of current) {
+    if (item && item.id && !map.has(item.id)) {
+      map.set(item.id, item);
+    }
+  }
+  return Array.from(map.values()).sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  );
+}
+
+function mergeUniqueTalks(incoming: SafetyTalk[], current: SafetyTalk[]): SafetyTalk[] {
+  const map = new Map<string, SafetyTalk>();
+  for (const item of incoming) {
+    if (item && item.id) map.set(item.id, item);
+  }
+  for (const item of current) {
+    if (item && item.id && !map.has(item.id)) {
+      map.set(item.id, item);
+    }
+  }
+  return Array.from(map.values()).sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  );
+}
+
+function mergeUniqueNotifications(
+  incoming: WorkerNotification[],
+  current: WorkerNotification[]
+): WorkerNotification[] {
+  const map = new Map<string, WorkerNotification>();
   for (const item of incoming) {
     if (item && item.id) map.set(item.id, item);
   }
@@ -133,7 +188,7 @@ export default function App() {
   };
 
   // Navigation tab inside Matrix
-  const [currentTab, setCurrentTab] = useState<'dashboard' | 'incidents'>('dashboard');
+  const [currentTab, setCurrentTab] = useState<'dashboard' | 'incidents' | 'talks' | 'notifications'>('dashboard');
 
   // Sound preference
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -143,9 +198,11 @@ export default function App() {
   const [isConnectingCloud, setIsConnectingCloud] = useState(false);
   const [cloudSyncError, setCloudSyncError] = useState<string>('');
 
-  // Persistent tombstones for deleted incidents so polling/Drive/tabs never resurrect them
+  // Persistent tombstones for deleted incidents, talks & notifications so polling/Drive/tabs never resurrect them
   const deletedIdsRef = useRef<Set<string>>(loadStoredSet(DELETED_IDS_KEY));
   const deletedCodesRef = useRef<Set<string>>(loadStoredSet(DELETED_CODES_KEY));
+  const deletedTalkIdsRef = useRef<Set<string>>(loadStoredSet(DELETED_TALK_IDS_KEY));
+  const deletedNotificationIdsRef = useRef<Set<string>>(loadStoredSet(DELETED_NOTIFICATION_IDS_KEY));
 
   const isIncidentDeleted = useCallback((inc: { id?: string; code?: string } | null | undefined) => {
     if (!inc) return false;
@@ -165,6 +222,30 @@ export default function App() {
     }
   }, []);
 
+  const isTalkDeleted = useCallback((talk: { id?: string } | null | undefined) => {
+    if (!talk || !talk.id) return false;
+    return deletedTalkIdsRef.current.has(talk.id);
+  }, []);
+
+  const markTalkDeleted = useCallback((id: string) => {
+    if (id) {
+      deletedTalkIdsRef.current.add(id);
+      saveStoredSet(DELETED_TALK_IDS_KEY, deletedTalkIdsRef.current);
+    }
+  }, []);
+
+  const isNotificationDeleted = useCallback((notif: { id?: string } | null | undefined) => {
+    if (!notif || !notif.id) return false;
+    return deletedNotificationIdsRef.current.has(notif.id);
+  }, []);
+
+  const markNotificationDeleted = useCallback((id: string) => {
+    if (id) {
+      deletedNotificationIdsRef.current.add(id);
+      saveStoredSet(DELETED_NOTIFICATION_IDS_KEY, deletedNotificationIdsRef.current);
+    }
+  }, []);
+
   // Core Data States with localStorage persistence
   const [incidents, setIncidents] = useState<Incident[]>(() => {
     try {
@@ -178,10 +259,33 @@ export default function App() {
     }
   });
 
+  const [safetyTalks, setSafetyTalks] = useState<SafetyTalk[]>(() => {
+    try {
+      const saved = localStorage.getItem('prev_safety_talks');
+      const base: SafetyTalk[] = saved ? JSON.parse(saved) : [];
+      const dTalkIds = loadStoredSet(DELETED_TALK_IDS_KEY);
+      return Array.isArray(base) ? base.filter((t) => t && t.id && !dTalkIds.has(t.id)) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [workerNotifications, setWorkerNotifications] = useState<WorkerNotification[]>(() => {
+    try {
+      const saved = localStorage.getItem('prev_worker_notifications');
+      const base: WorkerNotification[] = saved ? JSON.parse(saved) : [];
+      const dNotifIds = loadStoredSet(DELETED_NOTIFICATION_IDS_KEY);
+      return Array.isArray(base) ? base.filter((n) => n && n.id && !dNotifIds.has(n.id)) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [daysWithoutLTI, setDaysWithoutLTI] = useState<number>(142);
 
   // Live incoming notification & SOS emergency banner on Matrix
   const [incomingBanner, setIncomingBanner] = useState<{ code: string; title: string } | null>(null);
+  const [incomingTalkBanner, setIncomingTalkBanner] = useState<{ code: string; topic: string } | null>(null);
   const [activeEmergency, setActiveEmergency] = useState<EmergencyState | null>(null);
 
   // Modals state
@@ -192,13 +296,19 @@ export default function App() {
 
   // Field submissions tracked for satellite history
   const [mySatelliteIncidents, setMySatelliteIncidents] = useState<Incident[]>([]);
+  const [mySatelliteTalks, setMySatelliteTalks] = useState<SafetyTalk[]>([]);
 
   const broadcastRef = useRef<BroadcastChannel | null>(null);
   const knownIdsRef = useRef<Set<string>>(new Set(incidents.map((i) => i.id)));
+  const knownTalkIdsRef = useRef<Set<string>>(new Set(safetyTalks.map((t) => t.id)));
 
   useEffect(() => {
     knownIdsRef.current = new Set(incidents.map((i) => i.id));
   }, [incidents]);
+
+  useEffect(() => {
+    knownTalkIdsRef.current = new Set(safetyTalks.map((t) => t.id));
+  }, [safetyTalks]);
 
   const notifyNewIncoming = useCallback((inc: Incident) => {
     if (isIncidentDeleted(inc)) return;
@@ -210,6 +320,17 @@ export default function App() {
       }, 6500);
     }
   }, [isIncidentDeleted]);
+
+  const notifyNewIncomingTalk = useCallback((talk: SafetyTalk) => {
+    if (isTalkDeleted(talk)) return;
+    if (!knownTalkIdsRef.current.has(talk.id)) {
+      safetyAudio.playIncidentAlert('Leve');
+      setIncomingTalkBanner({ code: talk.code, topic: talk.topic });
+      setTimeout(() => {
+        setIncomingTalkBanner((prev) => (prev?.code === talk.code ? null : prev));
+      }, 6500);
+    }
+  }, [isTalkDeleted]);
 
   const postToBroadcast = useCallback((type: string, payload: unknown) => {
     try {
@@ -230,13 +351,20 @@ export default function App() {
   useEffect(() => {
     if (!firebaseUser || !firebaseUser.emailVerified) return;
 
-    // Auto-flush any reports created on this phone prior to cloud login (excluding deleted ones)
+    // Auto-flush any reports or talks created on this phone prior to cloud login (excluding deleted ones)
     const localFieldReports = incidents.filter(
       (i) => (i.id.startsWith('field-') || i.id.startsWith('sos-')) && !isIncidentDeleted(i)
     );
     if (localFieldReports.length > 0) {
       Promise.allSettled(
         localFieldReports.map((inc) => saveIncidentToFirestore(inc))
+      ).catch(() => {});
+    }
+
+    const localFieldTalks = safetyTalks.filter((t) => !isTalkDeleted(t));
+    if (localFieldTalks.length > 0) {
+      Promise.allSettled(
+        localFieldTalks.map((talk) => saveSafetyTalkToFirestore(talk))
       ).catch(() => {});
     }
 
@@ -284,6 +412,87 @@ export default function App() {
       }
     );
 
+    const unsubTalks = subscribeSafetyTalksFromFirestore(
+      (cloudTalks) => {
+        const activeCloud = cloudTalks.filter((t) => !isTalkDeleted(t));
+        const deletedStillInCloud = cloudTalks.filter((t) => isTalkDeleted(t));
+        if (deletedStillInCloud.length > 0) {
+          Promise.allSettled(
+            deletedStillInCloud.map((t) => deleteSafetyTalkFromFirestore(t.id))
+          ).catch(() => {});
+        }
+
+        if (activeCloud.length > 0) {
+          setSafetyTalks((current) => {
+            const newItems = activeCloud.filter(
+              (c) => !current.some((cur) => cur.id === c.id)
+            );
+            if (newItems.length > 0) {
+              notifyNewIncomingTalk(newItems[0]);
+            }
+            return mergeUniqueTalks(activeCloud, current).filter(
+              (t) => !isTalkDeleted(t)
+            );
+          });
+          syncBatchTalksApi(activeCloud).catch(() => {});
+        }
+      },
+      (err) => {
+        console.warn('[Firestore Talks Sync Error]:', err.message);
+      },
+      (removedIds) => {
+        if (removedIds.length === 0) return;
+        removedIds.forEach((rid) => {
+          markTalkDeleted(rid);
+          deleteTalkApi(rid).catch(() => {});
+        });
+        const removedSet = new Set(removedIds);
+        setSafetyTalks((prev) => prev.filter((t) => !removedSet.has(t.id)));
+        setMySatelliteTalks((prev) => prev.filter((t) => !removedSet.has(t.id)));
+      }
+    );
+
+    const isAdminUser = firebaseUser.email?.toLowerCase() === 'prevred3@gmail.com';
+    if (isAdminUser) {
+      const localNotifs = workerNotifications.filter((n) => !isNotificationDeleted(n));
+      if (localNotifs.length > 0) {
+        Promise.allSettled(
+          localNotifs.map((n) => saveWorkerNotificationToFirestore(n))
+        ).catch(() => {});
+      }
+    }
+
+    const unsubNotifications = subscribeWorkerNotificationsFromFirestore(
+      (cloudNotifs) => {
+        const activeCloud = cloudNotifs.filter((n) => !isNotificationDeleted(n));
+        const deletedStillInCloud = cloudNotifs.filter((n) => isNotificationDeleted(n));
+        if (deletedStillInCloud.length > 0 && isAdminUser) {
+          Promise.allSettled(
+            deletedStillInCloud.map((n) => deleteWorkerNotificationFromFirestore(n.id))
+          ).catch(() => {});
+        }
+
+        if (activeCloud.length > 0) {
+          setWorkerNotifications((current) =>
+            mergeUniqueNotifications(activeCloud, current).filter((n) => !isNotificationDeleted(n))
+          );
+          syncBatchNotificationsApi(activeCloud).catch(() => {});
+        }
+      },
+      (err) => {
+        console.warn('[Firestore Notifications Sync Error]:', err.message);
+      },
+      (removedIds) => {
+        if (removedIds.length === 0) return;
+        removedIds.forEach((rid) => {
+          markNotificationDeleted(rid);
+          deleteNotificationApi(rid).catch(() => {});
+        });
+        const removedSet = new Set(removedIds);
+        setWorkerNotifications((prev) => prev.filter((n) => !removedSet.has(n.id)));
+      }
+    );
+
     const unsubEmergency = subscribeEmergencyFromFirestore((cloudEmergency) => {
       if (cloudEmergency?.active) {
         setActiveEmergency(cloudEmergency);
@@ -295,9 +504,21 @@ export default function App() {
 
     return () => {
       unsubIncidents();
+      unsubTalks();
+      unsubNotifications();
       unsubEmergency();
     };
-  }, [firebaseUser, notifyNewIncoming, isIncidentDeleted, markIncidentDeleted]);
+  }, [
+    firebaseUser,
+    notifyNewIncoming,
+    isIncidentDeleted,
+    markIncidentDeleted,
+    notifyNewIncomingTalk,
+    isTalkDeleted,
+    markTalkDeleted,
+    isNotificationDeleted,
+    markNotificationDeleted
+  ]);
 
   const handleConnectCloudSync = async () => {
     setIsConnectingCloud(true);
@@ -332,6 +553,26 @@ export default function App() {
         markIncidentDeleted(payload.id, payload.code);
         setIncidents((prev) => prev.filter((i) => i.id !== payload.id));
         setMySatelliteIncidents((prev) => prev.filter((i) => i.id !== payload.id));
+      } else if (type === 'talk:created' && payload?.id) {
+        if (isTalkDeleted(payload)) return;
+        notifyNewIncomingTalk(payload as SafetyTalk);
+        setSafetyTalks((prev) => mergeUniqueTalks([payload as SafetyTalk], prev));
+      } else if (type === 'talk:updated' && payload?.id) {
+        if (isTalkDeleted(payload)) return;
+        setSafetyTalks((prev) => prev.map((t) => (t.id === payload.id ? payload : t)));
+      } else if (type === 'talk:deleted' && payload?.id) {
+        markTalkDeleted(payload.id);
+        setSafetyTalks((prev) => prev.filter((t) => t.id !== payload.id));
+        setMySatelliteTalks((prev) => prev.filter((t) => t.id !== payload.id));
+      } else if (type === 'notification:created' && payload?.id) {
+        if (isNotificationDeleted(payload)) return;
+        setWorkerNotifications((prev) => mergeUniqueNotifications([payload as WorkerNotification], prev));
+      } else if (type === 'notification:updated' && payload?.id) {
+        if (isNotificationDeleted(payload)) return;
+        setWorkerNotifications((prev) => prev.map((n) => (n.id === payload.id ? payload : n)));
+      } else if (type === 'notification:deleted' && payload?.id) {
+        markNotificationDeleted(payload.id);
+        setWorkerNotifications((prev) => prev.filter((n) => n.id !== payload.id));
       } else if (type === 'emergency:updated') {
         setActiveEmergency(payload);
         if (payload?.active) safetyAudio.playEmergencySiren();
@@ -342,7 +583,16 @@ export default function App() {
       channel.close();
       broadcastRef.current = null;
     };
-  }, [notifyNewIncoming, isIncidentDeleted, markIncidentDeleted]);
+  }, [
+    notifyNewIncoming,
+    isIncidentDeleted,
+    markIncidentDeleted,
+    notifyNewIncomingTalk,
+    isTalkDeleted,
+    markTalkDeleted,
+    isNotificationDeleted,
+    markNotificationDeleted
+  ]);
 
   // 2. WebSocket real-time connection to /ws + auto-reconnect
   useEffect(() => {
@@ -368,6 +618,18 @@ export default function App() {
               if (serverIncidents.length > 0) {
                 setIncidents((prev) => mergeUniqueIncidents(serverIncidents, prev));
               }
+              const serverTalks: SafetyTalk[] = Array.isArray(msg.payload.safetyTalks)
+                ? msg.payload.safetyTalks.filter((t: SafetyTalk) => !isTalkDeleted(t))
+                : [];
+              if (serverTalks.length > 0) {
+                setSafetyTalks((prev) => mergeUniqueTalks(serverTalks, prev));
+              }
+              const serverNotifs: WorkerNotification[] = Array.isArray(msg.payload.workerNotifications)
+                ? msg.payload.workerNotifications.filter((n: WorkerNotification) => !isNotificationDeleted(n))
+                : [];
+              if (serverNotifs.length > 0) {
+                setWorkerNotifications((prev) => mergeUniqueNotifications(serverNotifs, prev));
+              }
               if (msg.payload.emergency?.active) {
                 setActiveEmergency(msg.payload.emergency);
               }
@@ -388,6 +650,40 @@ export default function App() {
               markIncidentDeleted(msg.payload.id, msg.payload.code);
               setIncidents((prev) => prev.filter((i) => i.id !== msg.payload.id));
               setMySatelliteIncidents((prev) => prev.filter((i) => i.id !== msg.payload.id));
+            } else if (msg.type === 'talk:created' && msg.payload?.id) {
+              const createdTalk = msg.payload as SafetyTalk;
+              if (isTalkDeleted(createdTalk)) return;
+              notifyNewIncomingTalk(createdTalk);
+              setSafetyTalks((prev) => mergeUniqueTalks([createdTalk], prev));
+            } else if (msg.type === 'talks:synced' && Array.isArray(msg.payload)) {
+              const filteredTalks = (msg.payload as SafetyTalk[]).filter((t) => !isTalkDeleted(t));
+              setSafetyTalks((prev) => mergeUniqueTalks(filteredTalks, prev));
+            } else if (msg.type === 'talk:updated' && msg.payload?.id) {
+              if (isTalkDeleted(msg.payload)) return;
+              setSafetyTalks((prev) =>
+                prev.map((t) => (t.id === msg.payload.id ? msg.payload : t))
+              );
+            } else if (msg.type === 'talk:deleted' && msg.payload?.id) {
+              markTalkDeleted(msg.payload.id);
+              setSafetyTalks((prev) => prev.filter((t) => t.id !== msg.payload.id));
+              setMySatelliteTalks((prev) => prev.filter((t) => t.id !== msg.payload.id));
+            } else if (msg.type === 'notification:created' && msg.payload?.id) {
+              const createdNotif = msg.payload as WorkerNotification;
+              if (isNotificationDeleted(createdNotif)) return;
+              setWorkerNotifications((prev) => mergeUniqueNotifications([createdNotif], prev));
+            } else if (msg.type === 'notifications:synced' && Array.isArray(msg.payload)) {
+              const filteredNotifs = (msg.payload as WorkerNotification[]).filter(
+                (n) => !isNotificationDeleted(n)
+              );
+              setWorkerNotifications((prev) => mergeUniqueNotifications(filteredNotifs, prev));
+            } else if (msg.type === 'notification:updated' && msg.payload?.id) {
+              if (isNotificationDeleted(msg.payload)) return;
+              setWorkerNotifications((prev) =>
+                prev.map((n) => (n.id === msg.payload.id ? msg.payload : n))
+              );
+            } else if (msg.type === 'notification:deleted' && msg.payload?.id) {
+              markNotificationDeleted(msg.payload.id);
+              setWorkerNotifications((prev) => prev.filter((n) => n.id !== msg.payload.id));
             } else if (msg.type === 'emergency:updated') {
               setActiveEmergency(msg.payload);
               if (msg.payload?.active) {
@@ -420,32 +716,81 @@ export default function App() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       ws?.close();
     };
-  }, [notifyNewIncoming, isIncidentDeleted, markIncidentDeleted]);
+  }, [
+    notifyNewIncoming,
+    isIncidentDeleted,
+    markIncidentDeleted,
+    notifyNewIncomingTalk,
+    isTalkDeleted,
+    markTalkDeleted,
+    isNotificationDeleted,
+    markNotificationDeleted
+  ]);
 
-  // 3. Initial server fetch + resilient 2.5s REST polling fallback
+  // 3. Initial server fetch + resilient 2.5s REST polling fallback (incidents + signed talks + worker notifications)
   useEffect(() => {
     let active = true;
 
     async function syncFromServer(isInitial: boolean) {
-      const res = await fetchIncidentsFromServer();
-      if (!active || !res.ok) return;
+      const [res, talksRes, notifsRes] = await Promise.all([
+        fetchIncidentsFromServer(),
+        fetchTalksFromServer(),
+        fetchNotificationsFromServer()
+      ]);
+      if (!active) return;
 
-      const deletedOnServer = res.data.filter((item) => isIncidentDeleted(item));
-      if (deletedOnServer.length > 0) {
-        Promise.allSettled(deletedOnServer.map((item) => deleteIncidentApi(item.id))).catch(() => {});
+      if (res.ok) {
+        const deletedOnServer = res.data.filter((item) => isIncidentDeleted(item));
+        if (deletedOnServer.length > 0) {
+          Promise.allSettled(deletedOnServer.map((item) => deleteIncidentApi(item.id))).catch(() => {});
+        }
+
+        const validServerData = res.data.filter((item) => !isIncidentDeleted(item));
+        if (validServerData.length > 0) {
+          setIncidents((current) => {
+            if (!isInitial) {
+              const newItems = validServerData.filter((item) => !current.some((c) => c.id === item.id));
+              if (newItems.length > 0) {
+                notifyNewIncoming(newItems[0]);
+              }
+            }
+            return mergeUniqueIncidents(validServerData, current).filter((i) => !isIncidentDeleted(i));
+          });
+        }
       }
 
-      const validServerData = res.data.filter((item) => !isIncidentDeleted(item));
-      if (validServerData.length > 0) {
-        setIncidents((current) => {
-          if (!isInitial) {
-            const newItems = validServerData.filter((item) => !current.some((c) => c.id === item.id));
-            if (newItems.length > 0) {
-              notifyNewIncoming(newItems[0]);
+      if (talksRes.ok) {
+        const deletedTalksOnServer = talksRes.data.filter((item) => isTalkDeleted(item));
+        if (deletedTalksOnServer.length > 0) {
+          Promise.allSettled(deletedTalksOnServer.map((item) => deleteTalkApi(item.id))).catch(() => {});
+        }
+
+        const validServerTalks = talksRes.data.filter((item) => !isTalkDeleted(item));
+        if (validServerTalks.length > 0) {
+          setSafetyTalks((current) => {
+            if (!isInitial) {
+              const newItems = validServerTalks.filter((item) => !current.some((c) => c.id === item.id));
+              if (newItems.length > 0) {
+                notifyNewIncomingTalk(newItems[0]);
+              }
             }
-          }
-          return mergeUniqueIncidents(validServerData, current).filter((i) => !isIncidentDeleted(i));
-        });
+            return mergeUniqueTalks(validServerTalks, current).filter((t) => !isTalkDeleted(t));
+          });
+        }
+      }
+
+      if (notifsRes.ok) {
+        const deletedNotifsOnServer = notifsRes.data.filter((item) => isNotificationDeleted(item));
+        if (deletedNotifsOnServer.length > 0) {
+          Promise.allSettled(deletedNotifsOnServer.map((item) => deleteNotificationApi(item.id))).catch(() => {});
+        }
+
+        const validServerNotifs = notifsRes.data.filter((item) => !isNotificationDeleted(item));
+        if (validServerNotifs.length > 0) {
+          setWorkerNotifications((current) =>
+            mergeUniqueNotifications(validServerNotifs, current).filter((n) => !isNotificationDeleted(n))
+          );
+        }
       }
     }
 
@@ -456,7 +801,7 @@ export default function App() {
       active = false;
       clearInterval(pollInterval);
     };
-  }, [notifyNewIncoming, isIncidentDeleted]);
+  }, [notifyNewIncoming, isIncidentDeleted, notifyNewIncomingTalk, isTalkDeleted, isNotificationDeleted]);
 
   // 4. Import helper for Google Drive -> Matrix synchronization
   const handleImportFromDrive = useCallback(async (driveIncidents: Incident[]): Promise<number> => {
@@ -518,6 +863,22 @@ export default function App() {
       // Storage quota fallback
     }
   }, [incidents]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('prev_safety_talks', JSON.stringify(safetyTalks));
+    } catch {
+      // Storage quota fallback
+    }
+  }, [safetyTalks]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('prev_worker_notifications', JSON.stringify(workerNotifications));
+    } catch {
+      // Storage quota fallback
+    }
+  }, [workerNotifications]);
 
   const handleToggleSound = () => {
     const next = !soundEnabled;
@@ -601,6 +962,129 @@ export default function App() {
     }
   };
 
+  const handleAddSafetyTalk = async (newTalk: SafetyTalk): Promise<SafetyTalk> => {
+    let firestoreOk = false;
+    try {
+      firestoreOk = await saveSafetyTalkToFirestore(newTalk);
+    } catch (fsErr) {
+      console.warn('[Firestore] Error al guardar charla firmada:', fsErr);
+    }
+
+    let saved = newTalk;
+    try {
+      saved = await createTalkApi(newTalk);
+    } catch (apiErr) {
+      if (!firestoreOk) {
+        console.warn('[API] Guardado local de charla firmada:', apiErr);
+      }
+    }
+
+    setSafetyTalks((prev) => mergeUniqueTalks([saved], prev));
+    setMySatelliteTalks((prev) => mergeUniqueTalks([saved], prev));
+    safetyAudio.playIncidentAlert('Leve');
+    postToBroadcast('talk:created', saved);
+    return saved;
+  };
+
+  const handleValidateSafetyTalk = async (updatedTalk: SafetyTalk) => {
+    setSafetyTalks((prev) => prev.map((t) => (t.id === updatedTalk.id ? updatedTalk : t)));
+    postToBroadcast('talk:updated', updatedTalk);
+    try {
+      await Promise.allSettled([
+        updateTalkApi(updatedTalk),
+        updateSafetyTalkInFirestore(updatedTalk)
+      ]);
+    } catch (err) {
+      console.warn('Fallo al validar charla firmada:', err);
+    }
+  };
+
+  const handleDeleteSafetyTalk = async (id: string) => {
+    markTalkDeleted(id);
+    setSafetyTalks((prev) => prev.filter((t) => t.id !== id));
+    setMySatelliteTalks((prev) => prev.filter((t) => t.id !== id));
+    postToBroadcast('talk:deleted', { id });
+
+    try {
+      await Promise.allSettled([
+        deleteTalkApi(id),
+        deleteSafetyTalkFromFirestore(id)
+      ]);
+    } catch (err) {
+      console.warn('Fallo al eliminar charla en backend:', err);
+    }
+  };
+
+  const handleSendWorkerNotification = async (
+    newNotif: WorkerNotification
+  ): Promise<WorkerNotification> => {
+    let firestoreOk = false;
+    try {
+      firestoreOk = await saveWorkerNotificationToFirestore(newNotif);
+    } catch (fsErr) {
+      console.warn('[Firestore] Error al guardar notificación para trabajadores:', fsErr);
+    }
+
+    let saved = newNotif;
+    try {
+      saved = await createNotificationApi(newNotif);
+    } catch (apiErr) {
+      if (!firestoreOk) {
+        console.warn('[API] Guardado local de notificación:', apiErr);
+      }
+    }
+
+    setWorkerNotifications((prev) => mergeUniqueNotifications([saved], prev));
+    postToBroadcast('notification:created', saved);
+    return saved;
+  };
+
+  const handleAcknowledgeWorkerNotification = async (
+    notificationId: string,
+    workerName: string
+  ) => {
+    const cleanWorker = String(workerName || 'Operador Terreno').trim().slice(0, 120);
+    if (!cleanWorker) return;
+
+    setWorkerNotifications((prev) =>
+      prev.map((n) => {
+        if (n.id !== notificationId) return n;
+        const currentAck = Array.isArray(n.acknowledgedBy) ? n.acknowledgedBy : [];
+        if (currentAck.includes(cleanWorker)) return n;
+        const updated = {
+          ...n,
+          acknowledgedBy: [...currentAck, cleanWorker].slice(0, 50)
+        };
+        postToBroadcast('notification:updated', updated);
+        return updated;
+      })
+    );
+
+    try {
+      await Promise.allSettled([
+        acknowledgeNotificationApi(notificationId, cleanWorker),
+        acknowledgeWorkerNotificationInFirestore(notificationId, cleanWorker)
+      ]);
+    } catch (err) {
+      console.warn('Fallo al confirmar lectura de notificación:', err);
+    }
+  };
+
+  const handleDeleteWorkerNotification = async (id: string) => {
+    markNotificationDeleted(id);
+    setWorkerNotifications((prev) => prev.filter((n) => n.id !== id));
+    postToBroadcast('notification:deleted', { id });
+
+    try {
+      await Promise.allSettled([
+        deleteNotificationApi(id),
+        deleteWorkerNotificationFromFirestore(id)
+      ]);
+    } catch (err) {
+      console.warn('Fallo al eliminar notificación en backend:', err);
+    }
+  };
+
   // Trigger emergency notice from satellite field -> transmits SOS state + critical incident to Cloud Firestore & Express!
   const handleTriggerFieldEmergency = async (location: string, message: string) => {
     safetyAudio.playEmergencySiren();
@@ -663,6 +1147,7 @@ export default function App() {
   };
 
   const handleDismissEmergency = async () => {
+    safetyAudio.stopEmergencySiren();
     const cleared: Partial<EmergencyState> = {
       active: false,
       type: 'Evacuación General',
@@ -770,6 +1255,10 @@ export default function App() {
           onUnlockMatrixAsAdmin={handleAdminUnlockMatrix}
           onSubmitIncident={handleAddIncident}
           myRecentIncidents={mySatelliteIncidents.length > 0 ? mySatelliteIncidents : incidents}
+          onSubmitSafetyTalk={handleAddSafetyTalk}
+          myRecentTalks={mySatelliteTalks.length > 0 ? mySatelliteTalks : safetyTalks}
+          workerNotifications={workerNotifications}
+          onAcknowledgeNotification={handleAcknowledgeWorkerNotification}
           onTriggerEmergency={handleTriggerFieldEmergency}
           onDeleteIncident={handleDeleteIncident}
           onOpenDriveModal={effectiveSatelliteLocked ? undefined : () => setShowDriveModal(true)}
@@ -804,6 +1293,8 @@ export default function App() {
         soundEnabled={soundEnabled}
         onToggleSound={handleToggleSound}
         openIncidentsCount={openIncidentsCount}
+        talksCount={safetyTalks.length}
+        notificationsCount={workerNotifications.length}
       />
 
       {/* Mode Switcher & Cloud Sync Status Strip */}
@@ -914,6 +1405,40 @@ export default function App() {
         </div>
       )}
 
+      {/* Real-time Incoming Signed Safety Talk Banner */}
+      {incomingTalkBanner && (
+        <div className="bg-blue-950/90 border-b border-blue-500/40 px-4 py-2.5 text-blue-100">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-blue-400 shrink-0" />
+              <span>
+                <strong>Nueva Charla Firmada recibida desde Terreno:</strong>{' '}
+                <span className="font-mono text-amber-300">{incomingTalkBanner.code}</span> — {incomingTalkBanner.topic}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  setCurrentTab('talks');
+                  setIncomingTalkBanner(null);
+                }}
+                className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded font-semibold cursor-pointer"
+              >
+                Ver Charla
+              </button>
+              <button
+                type="button"
+                onClick={() => setIncomingTalkBanner(null)}
+                className="text-blue-300 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Content Viewport */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex-1 w-full">
         {currentTab === 'dashboard' && (
@@ -927,6 +1452,7 @@ export default function App() {
             onSimulateLiveIncident={handleSimulateLiveIncoming}
             daysWithoutLTI={daysWithoutLTI}
             onDeleteIncident={handleDeleteIncident}
+            onOpenNotificationsTab={() => setCurrentTab('notifications')}
           />
         )}
 
@@ -937,6 +1463,22 @@ export default function App() {
             onOpenReportModal={() => setShowReportModal(true)}
             onOpenDriveModal={() => setShowDriveModal(true)}
             onDeleteIncident={handleDeleteIncident}
+          />
+        )}
+
+        {currentTab === 'talks' && (
+          <SafetyTalksView
+            talks={safetyTalks}
+            onValidateTalk={handleValidateSafetyTalk}
+            onDeleteTalk={handleDeleteSafetyTalk}
+          />
+        )}
+
+        {currentTab === 'notifications' && (
+          <WorkerNotificationsView
+            notifications={workerNotifications}
+            onSendNotification={handleSendWorkerNotification}
+            onDeleteNotification={handleDeleteWorkerNotification}
           />
         )}
       </main>
